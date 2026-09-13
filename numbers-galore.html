@@ -2182,6 +2182,89 @@ const live = {
     if (!res.ok) throw new Error(data.error || "Couldn't load transactions");
     return data;
   },
+  // Submitting a request never moves points — it just queues something for
+  // an admin (see `liveAdmin` below) to approve or reject.
+  async requestWallet(type, amount, note) {
+    const res = await fetch("/api/wallet/requests", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.token}` },
+      body: JSON.stringify({ type, amount, note }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Couldn't submit request");
+    return data;
+  },
+  async myWalletRequests(limit = 20) {
+    const res = await fetch(`/api/wallet/requests?limit=${limit}`, {
+      headers: { Authorization: `Bearer ${this.token}` },
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Couldn't load requests");
+    return data;
+  },
+};
+
+/* A separate, independent live session for an admin account — kept apart
+   from `live` (the player session) on purpose. Both objects can be active
+   at once (e.g. testing as a live player in one tab-role and a live admin
+   in another) without either one's cached token/balance leaking into the
+   other, which sharing a single object would risk given this app lets one
+   browser tab hold demo Player/Agent/Admin identities side by side. */
+const liveAdmin = {
+  token: null,
+  user: null,
+  get active() { return !!this.token; },
+  restore() {
+    try {
+      const t = sessionStorage.getItem("ngLiveAdminToken");
+      const u = sessionStorage.getItem("ngLiveAdminUser");
+      if (t && u) { this.token = t; this.user = JSON.parse(u); }
+    } catch { /* private-browsing sessionStorage can throw — just stay signed out */ }
+  },
+  async login(email, password) {
+    const res = await fetch("/api/auth/login", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Login failed");
+    if (data.user.role !== "admin") throw new Error("That account isn't an admin account");
+    this.token = data.token; this.user = data.user;
+    try {
+      sessionStorage.setItem("ngLiveAdminToken", this.token);
+      sessionStorage.setItem("ngLiveAdminUser", JSON.stringify(this.user));
+    } catch {}
+  },
+  logout() {
+    this.token = null; this.user = null;
+    try { sessionStorage.removeItem("ngLiveAdminToken"); sessionStorage.removeItem("ngLiveAdminUser"); } catch {}
+  },
+  async listRequests(status) {
+    const q = status ? `?status=${encodeURIComponent(status)}` : "";
+    const res = await fetch(`/api/admin/wallet/requests${q}`, { headers: { Authorization: `Bearer ${this.token}` } });
+    const data = await res.json();
+    if (!res.ok) {
+      if (res.status === 401) this.logout();
+      throw new Error(data.error || "Couldn't load requests");
+    }
+    return data;
+  },
+  async approve(id) {
+    const res = await fetch(`/api/admin/wallet/requests/${id}/approve`, {
+      method: "POST", headers: { Authorization: `Bearer ${this.token}` },
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Couldn't approve");
+    return data;
+  },
+  async reject(id) {
+    const res = await fetch(`/api/admin/wallet/requests/${id}/reject`, {
+      method: "POST", headers: { Authorization: `Bearer ${this.token}` },
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Couldn't reject");
+    return data;
+  },
 };
 
 /** Every game view calls this instead of engine.play() directly — routes to
@@ -2832,6 +2915,7 @@ function boot() {
   // document shell — so the page declares its language at run time.
   document.documentElement.lang = document.documentElement.lang || "en";
   live.restore();
+  liveAdmin.restore();
   const ids = api.auth.identities();
   session.userId = ids.player.id;
   session.role = "player";
@@ -2865,6 +2949,7 @@ const NAV = {
     { href: "#/admin/players", ic: "☺", label: "Players" },
     { href: "#/admin/rounds", ic: "◎", label: "Rounds" },
     { href: "#/admin/ledger", ic: "▤", label: "Ledger" },
+    { href: "#/admin/live-requests", ic: "⇵", label: "Live requests" },
   ],
 };
 
@@ -2919,7 +3004,19 @@ function render() {
       topbar.appendChild(outBtn);
     } else {
       const liveBtn = el(`<button class="btn ghost sm" title="Sign in with your real account to play for real">Play for real</button>`);
-      liveBtn.onclick = openLiveLogin;
+      liveBtn.onclick = () => openLiveLogin("player");
+      topbar.appendChild(liveBtn);
+    }
+  }
+  if (session.role === "admin") {
+    if (liveAdmin.active) {
+      topbar.appendChild(el(`<span class="pill ok" title="Signed in as ${esc(liveAdmin.user.name)} — real admin session">● LIVE ADMIN</span>`));
+      const outBtn = el(`<button class="icon-btn" title="Sign out of live admin">⏻</button>`);
+      outBtn.onclick = () => { liveAdmin.logout(); toast("Signed out of live admin", ""); render(); };
+      topbar.appendChild(outBtn);
+    } else {
+      const liveBtn = el(`<button class="btn ghost sm" title="Sign in with a real admin account to manage live requests">Live admin sign-in</button>`);
+      liveBtn.onclick = () => openLiveLogin("admin");
       topbar.appendChild(liveBtn);
     }
   }
@@ -2941,6 +3038,7 @@ function render() {
     "agent": viewAgent, "agent/ledger": viewAgentLedger,
     "admin": viewAdminDash, "admin/games": viewAdminGames, "admin/agents": viewAdminAgents,
     "admin/players": viewAdminPlayers, "admin/rounds": viewAdminRounds, "admin/ledger": viewAdminLedger,
+    "admin/live-requests": viewAdminLiveRequests,
   };
   (R[route] || viewPlay)(view);
 }
@@ -5241,6 +5339,43 @@ function hotDiceResult(round) {
 /* =========================================================================
    PLAYER — account
    ========================================================================= */
+function walletRequestsTable(rows) {
+  const wrap = el(`<div class="tbl-wrap"><table class="tbl"><thead><tr><th>When</th><th>Type</th><th style="text-align:right">Amount</th><th>Note</th><th>Status</th></tr></thead><tbody></tbody></table></div>`);
+  const tb = wrap.querySelector("tbody");
+  if (!rows.length) { tb.appendChild(el(`<tr><td colspan="5" class="muted" style="text-align:center;padding:20px">No requests yet.</td></tr>`)); return wrap; }
+  rows.forEach((r) => tb.appendChild(el(`<tr>
+    <td class="mono" style="color:var(--ink-dim)">${fmtTime(new Date(r.createdAt).getTime())}</td>
+    <td><span class="pill ${r.type === "deposit" ? "ok" : ""}">${esc(r.type)}</span></td>
+    <td class="mono" style="text-align:right">${nice(r.amount)}</td>
+    <td>${esc(r.note || "")}</td>
+    <td><span class="pill ${r.status === "approved" ? "ok" : r.status === "rejected" ? "bad" : "warn"}">${esc(r.status)}</span></td>
+  </tr>`)));
+  return wrap;
+}
+
+// No real currency ever changes hands here — submitting just queues a row
+// for an admin to approve or reject on the Live requests page. See
+// [[project-numbers-galore-backend]] for why this is deliberately a manual
+// approval step rather than a payment-processor integration.
+function openWalletRequestModal(type) {
+  const box = el(`<div class="stack"></div>`);
+  box.appendChild(field(type === "deposit" ? "Amount to deposit" : "Amount to withdraw", "amount", { type: "number", placeholder: "100" }));
+  box.appendChild(field("Note (optional)", "note", { placeholder: type === "deposit" ? "e.g. how you'll pay" : "e.g. payout method" }));
+  modal({
+    title: type === "deposit" ? "Request a deposit" : "Request a withdrawal",
+    bodyNodes: box,
+    confirmText: "Submit request",
+    async onConfirm() {
+      const f = readForm(box);
+      const amt = Number(f.amount);
+      if (!(amt > 0)) throw new Error("Enter an amount greater than 0");
+      await live.requestWallet(type, amt, f.note || null);
+      toast("Request submitted — an admin will review it.", "ok");
+      render();
+    },
+  });
+}
+
 function viewAccount(view) {
   const me = api.player.me(session.userId);
   head(view, "My account", `${me.email || "no email"} · agent: ${me.agentName || "—"}`);
@@ -5249,6 +5384,26 @@ function viewAccount(view) {
     <div class="metric"><div class="k">Status</div><div class="v" style="font-size:18px">${esc(me.status)}</div></div>
   </div>`));
   if (live.active) {
+    const actions = el(`<div style="display:flex;gap:10px;margin:16px 0"></div>`);
+    const depBtn = el(`<button class="btn primary sm">Request deposit</button>`);
+    depBtn.onclick = () => openWalletRequestModal("deposit");
+    const wdBtn = el(`<button class="btn ghost sm">Request withdrawal</button>`);
+    wdBtn.onclick = () => openWalletRequestModal("withdrawal");
+    actions.append(depBtn, wdBtn);
+    view.appendChild(actions);
+
+    const reqHolder = el(`<div></div>`);
+    reqHolder.appendChild(el(`<p class="muted" style="margin:4px 2px 14px">Loading your requests…</p>`));
+    view.appendChild(reqHolder);
+    live.myWalletRequests(20).then((reqs) => {
+      reqHolder.innerHTML = "";
+      reqHolder.appendChild(el(`<h3 style="font-size:13px;margin:0 0 8px;color:var(--ink-dim)">Deposit / withdrawal requests</h3>`));
+      reqHolder.appendChild(walletRequestsTable(reqs));
+    }).catch((e) => {
+      reqHolder.innerHTML = "";
+      reqHolder.appendChild(el(`<p class="muted" style="margin:14px 2px">Couldn't load requests: ${esc(e.message)}</p>`));
+    });
+
     const holder = el(`<div></div>`);
     holder.appendChild(el(`<p class="muted" style="margin:14px 2px">Loading your real transaction history…</p>`));
     view.appendChild(holder);
@@ -5350,19 +5505,24 @@ function openTransfer(mode, agentUserId, target) {
   });
 }
 
-function openLiveLogin() {
+function openLiveLogin(kind = "player") {
   const box = el(`<div class="stack"></div>`);
   [field("Email", "email", { type: "email", placeholder: "you@example.com" }),
    field("Password", "password", { type: "password" })].forEach((n) => box.appendChild(n));
   modal({
-    title: "Sign in — play for real",
+    title: kind === "admin" ? "Sign in — manage live requests" : "Sign in — play for real",
     bodyNodes: box,
     confirmText: "Sign in",
     async onConfirm() {
       const f = readForm(box);
       if (!f.email || !f.password) throw new Error("Enter your email and password");
-      await live.login(f.email, f.password);
-      toast(`Signed in as ${live.user.name} — real balance ${nice(live.user.points)} points`, "ok");
+      if (kind === "admin") {
+        await liveAdmin.login(f.email, f.password);
+        toast(`Signed in as ${liveAdmin.user.name} (admin)`, "ok");
+      } else {
+        await live.login(f.email, f.password);
+        toast(`Signed in as ${live.user.name} — real balance ${nice(live.user.points)} points`, "ok");
+      }
       render();
     },
   });
@@ -5759,6 +5919,78 @@ function viewAdminLedger(view) {
   view.appendChild(bar);
   view.appendChild(host);
   paint();
+}
+
+/* =========================================================================
+   ADMIN — live requests (real deposits/withdrawals, requires a real admin
+   sign-in via `liveAdmin` — completely separate from the demo Admin
+   console's data above, which never touches the real server).
+   ========================================================================= */
+function viewAdminLiveRequests(view) {
+  head(view, "Live requests", "Real deposit/withdrawal requests from signed-in players — approve or reject each one.");
+
+  if (!liveAdmin.active) {
+    const box = el(`<div class="card" style="padding:24px;max-width:480px"></div>`);
+    box.appendChild(el(`<p class="muted" style="margin-bottom:14px;line-height:1.6">Sign in with a real admin account to see and act on players' live deposit/withdrawal requests. This is separate from the demo Operator identity above — nothing here touches the demo data.</p>`));
+    const btn = el(`<button class="btn primary">Sign in as admin</button>`);
+    btn.onclick = () => openLiveLogin("admin");
+    box.appendChild(btn);
+    view.appendChild(box);
+    return;
+  }
+
+  const bar = el(`<div class="game-tabs"></div>`);
+  const statuses = ["pending", "approved", "rejected", ""];
+  let filter = "pending";
+  const wrap = el(`<div class="tbl-wrap"><table class="tbl"><thead><tr><th>When</th><th>Player</th><th>Type</th><th style="text-align:right">Amount</th><th>Note</th><th style="text-align:right">Action</th></tr></thead><tbody></tbody></table></div>`);
+  const tb = wrap.querySelector("tbody");
+
+  async function reload() {
+    tb.innerHTML = `<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">Loading…</td></tr>`;
+    try {
+      const rows = await liveAdmin.listRequests(filter || undefined);
+      tb.innerHTML = "";
+      if (!rows.length) { tb.appendChild(el(`<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">No requests${filter ? ` — ${filter}` : ""}.</td></tr>`)); return; }
+      rows.forEach((r) => {
+        const row = el(`<tr>
+          <td class="mono" style="color:var(--ink-dim)">${fmtTime(new Date(r.createdAt).getTime())}</td>
+          <td>${esc(r.userName)}<br><span class="muted" style="font-size:11px">${esc(r.userEmail || "")}</span></td>
+          <td><span class="pill ${r.type === "deposit" ? "ok" : ""}">${esc(r.type)}</span></td>
+          <td class="mono" style="text-align:right">${nice(r.amount)}</td>
+          <td>${esc(r.note || "")}</td>
+        </tr>`);
+        const actionTd = el(`<td style="text-align:right"></td>`);
+        if (r.status === "pending") {
+          const okBtn = el(`<button class="btn primary sm">Approve</button>`);
+          okBtn.onclick = async () => {
+            try { await liveAdmin.approve(r.id); toast("Approved", "ok"); reload(); }
+            catch (e) { toast(e.message, "bad"); }
+          };
+          const noBtn = el(`<button class="btn ghost sm" style="margin-left:6px">Reject</button>`);
+          noBtn.onclick = async () => {
+            try { await liveAdmin.reject(r.id); toast("Rejected", ""); reload(); }
+            catch (e) { toast(e.message, "bad"); }
+          };
+          actionTd.append(okBtn, noBtn);
+        } else {
+          actionTd.appendChild(el(`<span class="pill ${r.status === "approved" ? "ok" : "bad"}">${esc(r.status)}</span>`));
+        }
+        row.appendChild(actionTd);
+        tb.appendChild(row);
+      });
+    } catch (e) {
+      tb.innerHTML = `<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">Couldn't load: ${esc(e.message)}</td></tr>`;
+    }
+  }
+
+  statuses.forEach((s) => {
+    const b = el(`<button class="game-tab ${filter === s ? "on" : ""}" style="padding:6px 13px;font-size:12px">${s || "All"}</button>`);
+    b.onclick = () => { filter = s; [...bar.children].forEach((c) => c.classList.remove("on")); b.classList.add("on"); reload(); };
+    bar.appendChild(b);
+  });
+  view.appendChild(bar);
+  view.appendChild(wrap);
+  reload();
 }
 
 /* ---- go --------------------------------------------------------------- */
