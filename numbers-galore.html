@@ -1208,6 +1208,7 @@ hr.sep { border: none; border-top: 1px solid var(--line-soft); margin: 4px 0; }
   background: rgba(43,107,255,.12); border: 1px solid rgba(43,107,255,.45); color: #cfe0ff; cursor: pointer;
 }
 .b3-iconbtn:hover { background: rgba(43,107,255,.26); border-color: var(--b3-neon); }
+.b3-headicons { display: flex; align-items: center; gap: 8px; flex: none; }
 @media (pointer: coarse) { .b3-iconbtn { width: 46px; height: 46px; } }
 
 /* ---- the reel housing ---- */
@@ -1511,7 +1512,7 @@ hr.sep { border: none; border-top: 1px solid var(--line-soft); margin: 4px 0; }
 // seeded into the store once and read from there at run time, so an existing
 // install would keep the old paytable and the removed game — bumping the key
 // re-seeds both. Any change to the games list or a paytable needs this.
-const STORE_KEY = "numbers-galore-v6";
+const STORE_KEY = "numbers-galore-v8";
 /* Lobby room — the operator's backdrop (Desktop/ng-lobby/lobby-ok.png),
    cropped below the wordmark baked into the top of it so the page can carry a
    real heading instead of a picture of one. */
@@ -1688,6 +1689,7 @@ function seedData() {
       config: {
         pool: 80, draw: 20, minPick: 1, maxPick: 8,
         minStake: 1, maxStake: 100, maxWin: 500000,
+        defaultStake: 1, defaultLuckyN: 4,
         paytable: KENO_PAYTABLE(),
       },
     },
@@ -1696,7 +1698,7 @@ function seedData() {
       blurb: "Find 6 of 48 in a 35-ball draw. The faster your six land, the bigger the multiplier. Pick 7–8 for a system bet, plus speciality bets on the first five balls.",
       config: {
         pool: 48, draw: 35, preNumbers: 5, minPick: 6, maxPick: 8,
-        minStake: 1, maxStake: 50, maxWin: 1000000,
+        minStake: 1, maxStake: 50, maxWin: 1000000, defaultStake: 1,
         // Bonus symbol is built but hidden/disabled for now (operator may switch it on later) —
         // flip `enabled` to true to bring it back; nothing else needs to change.
         bonus: { enabled: false, from: 6, to: 35, multiplier: 2 },
@@ -1709,7 +1711,7 @@ function seedData() {
       blurb: "Three dice hit the table. Bet the total (3–18), plus Small/Big, Odd/Even and the Hard Ways. Lay as many bets as you like each round.",
       config: {
         dice: 3, faces: 6,
-        minStake: 1, maxStake: 50, maxWin: 100000,
+        minStake: 1, maxStake: 50, maxWin: 100000, defaultChip: 5,
         odds: HOTDICE_ODDS(),
         evenMoney: 1.8,          // Small/Big and Odd/Even
         hardWay: 150,            // an exact triple (3×N)
@@ -1721,7 +1723,7 @@ function seedData() {
       blurb: "Three animal-head reels spin 0–9. Call a number's position, its exact order with the next one or all three, or just that it shows up somewhere.",
       config: {
         reels: 3, faces: 10,
-        minStake: 1, maxStake: 50, maxWin: 500000,
+        minStake: 1, maxStake: 50, maxWin: 500000, defaultChip: 5,
         pay: {
           single: 7.5,       // First / Second / Third — one specific reel
           show: 2.5,          // that number in any of the 3 reels, at least once
@@ -2855,7 +2857,140 @@ function head(view, title, sub, actions) {
    ========================================================================= */
 let kenoState = null;
 let currentGameId = null;   // null = lobby
-let soundEnabled = true;    // platform-wide sound toggle — no audio engine wired up yet, this just drives the icon
+let soundEnabled = true;    // platform-wide mute
+// Starts well under max on purpose — holding the icon needs real headroom to
+// climb through before "louder" is audible at all (it used to start at 0.7,
+// a 43% ceiling that a human ear barely registers as a change).
+let soundVolume = 0.45;     // 0..1, raised by holding the sound icon
+
+/* ---------------------------------------------------------------------------
+   SOUND — every effect is synthesised (oscillators + filtered noise), not a
+   sample. Nothing to embed, nothing to load, and it costs the file 0 bytes —
+   worth remembering before ever reaching for a recorded sound in this app.
+   ------------------------------------------------------------------------- */
+let AUDIO_CTX = null;
+function audioCtx() {
+  const Ctor = window.AudioContext || window.webkitAudioContext;
+  if (!Ctor) return null;
+  if (!AUDIO_CTX) AUDIO_CTX = new Ctor();
+  if (AUDIO_CTX.state === "suspended") AUDIO_CTX.resume();
+  return AUDIO_CTX;
+}
+// A short tone, optionally sliding to a second frequency (a "land" or "lose"
+// dip). Envelope is exponential so it clicks on cleanly and never pops on cut.
+function playTone(freq, dur, { type = "sine", peak = 0.2, slideTo } = {}) {
+  if (!soundEnabled || soundVolume <= 0) return;
+  try {
+    const ctx = audioCtx();
+    if (!ctx) return;
+    const t0 = ctx.currentTime;
+    const osc = ctx.createOscillator(), gain = ctx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t0);
+    if (slideTo) osc.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur);
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(Math.max(0.0002, peak * soundVolume), t0 + 0.015);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(t0); osc.stop(t0 + dur + 0.02);
+  } catch { /* never let a sound failure break a game */ }
+}
+// Filtered white noise — a rattle/tumble/spin texture no oscillator can make.
+function playNoise(dur, { filterFreq = 1000, peak = 0.25, q = 1 } = {}) {
+  if (!soundEnabled || soundVolume <= 0) return;
+  try {
+    const ctx = audioCtx();
+    if (!ctx) return;
+    const t0 = ctx.currentTime;
+    const n = Math.max(1, Math.floor(ctx.sampleRate * dur));
+    const buf = ctx.createBuffer(1, n, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / n);
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const filt = ctx.createBiquadFilter();
+    filt.type = "bandpass"; filt.frequency.value = filterFreq; filt.Q.value = q;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(Math.max(0.0002, peak * soundVolume), t0);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    src.connect(filt).connect(gain).connect(ctx.destination);
+    src.start(t0);
+  } catch { /* never let a sound failure break a game */ }
+}
+const sfx = {
+  toggle() { playTone(soundEnabled ? 660 : 320, 0.08, { type: "sine", peak: 0.32 }); },
+  blip()   { playTone(880, 0.06, { type: "sine", peak: 0.24 }); },
+  tap()    { playTone(720, 0.05, { type: "square", peak: 0.2 }); },
+  chip()   { playTone(1040, 0.04, { type: "square", peak: 0.18 }); },
+  select() { playTone(540, 0.06, { type: "triangle", peak: 0.26 }); },
+  land()   { playTone(320, 0.1, { type: "sine", slideTo: 190, peak: 0.4 }); },
+  spin()   { playNoise(0.15, { filterFreq: 950, peak: 0.24 }); },
+  roll()   { playNoise(0.32, { filterFreq: 650, peak: 0.34, q: 0.7 }); },
+  win()    { playTone(523.25, 0.12, { peak: 0.36 }); setTimeout(() => playTone(659.25, 0.12, { peak: 0.36 }), 100); setTimeout(() => playTone(784.0, 0.2, { peak: 0.42 }), 200); },
+  lose()   { playTone(220, 0.26, { type: "sine", slideTo: 130, peak: 0.3 }); },
+};
+
+// The three visual states of the sound icon — off, and two volume levels —
+// so holding to raise the volume has something to actually show for itself.
+function soundIconSVG() {
+  if (!soundEnabled) return `<svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6.5 9H3v6h3.5L11 19z"/><path d="m16 9.5 5 5"/><path d="m21 9.5-5 5"/></svg>`;
+  if (soundVolume < 0.55) return `<svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6.5 9H3v6h3.5L11 19z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/></svg>`;
+  return `<svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6.5 9H3v6h3.5L11 19z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.8a9 9 0 0 1 0 12.4"/></svg>`;
+}
+// One sound icon, shared by every game: a tap mutes/unmutes; holding it down
+// ramps the volume up (and un-mutes, since asking for more volume while muted
+// can only mean "actually, I do want sound"). `extraClass`/style let each
+// game keep its own positioning (Keno/Hot Dice float it over the art; Just 6
+// and Big 3 put it in a plain toolbar); `baseClass` lets Big 3 use its own
+// icon-button skin (`b3-iconbtn`) instead of the shared `j6-iconbtn` look.
+// Deliberately does NOT call a game's `refresh()` — every game's refresh does
+// a full clearAndReturn()+rebuild of the whole screen, and calling that while
+// a draw/roll/spin animation is running (which manipulates its own captured
+// DOM references directly) orphans those references mid-animation: the
+// numbers keep drawing in the background but nothing more is seen on screen
+// until the final render() at the end. The button repaints its own icon
+// locally instead, which is all a sound change ever needs.
+const SOUND_HOLD_MS = 380, SOUND_RAMP_MS = 190;
+function soundIconBtn(extraClass, style, baseClass = "j6-iconbtn") {
+  const label = () => `Sound ${soundEnabled ? "on" : "off"}. Tap to mute or unmute, hold to raise the volume.`;
+  const btn = el(`<button class="${baseClass}${extraClass ? " " + extraClass : ""}" data-fk="sound" aria-pressed="${soundEnabled}" aria-label="${label()}"${style ? ` style="${style}"` : ""}>${soundIconSVG()}</button>`);
+  let holdTimer = null, rampTimer = null, held = false;
+  const clearTimers = () => { clearTimeout(holdTimer); clearInterval(rampTimer); holdTimer = null; rampTimer = null; };
+  const repaint = () => { btn.innerHTML = soundIconSVG(); btn.setAttribute("aria-pressed", soundEnabled); btn.setAttribute("aria-label", label()); };
+  const bump = () => {
+    soundEnabled = true;
+    soundVolume = Math.min(1, +(soundVolume + 0.18).toFixed(2));
+    sfx.blip();
+    repaint();
+    if (soundVolume >= 1) clearTimers();
+  };
+  btn.addEventListener("pointerdown", (e) => {
+    if (e.button != null && e.button !== 0) return;
+    held = false;
+    holdTimer = setTimeout(() => { held = true; bump(); rampTimer = setInterval(bump, SOUND_RAMP_MS); }, SOUND_HOLD_MS);
+  });
+  const finish = () => {
+    const wasHeld = held;
+    clearTimers();
+    if (wasHeld) { announce(`Volume ${Math.round(soundVolume * 100)}%`); return; }
+    soundEnabled = !soundEnabled;
+    sfx.toggle();
+    repaint();
+    announce(soundEnabled ? "Sound on" : "Sound off");
+  };
+  btn.addEventListener("pointerup", finish);
+  btn.addEventListener("pointerleave", clearTimers);
+  btn.addEventListener("pointercancel", clearTimers);
+  btn.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault();
+    soundEnabled = !soundEnabled;
+    sfx.toggle();
+    repaint();
+    announce(soundEnabled ? "Sound on" : "Sound off");
+  });
+  return btn;
+}
 
 const GAME_TAGLINES = {
   keno:    "Pick up to 8 of 80 · win big",
@@ -2936,7 +3071,7 @@ function viewKeno(view) {
   const cfg = game.config;
   const me = api.player.me(session.userId);
   if (!kenoState || kenoState.gameId !== "keno")
-    kenoState = { gameId: "keno", picks: [], stake: 1, luckyN: 4, busy: false, drawing: false, lastRound: null, focusN: 1 };
+    kenoState = { gameId: "keno", picks: [], stake: cfg.defaultStake ?? cfg.minStake, luckyN: cfg.defaultLuckyN ?? 4, busy: false, drawing: false, lastRound: null, focusN: 1 };
   const S = kenoState;
   const R = S.lastRound;
   const locked = S.busy || S.drawing;
@@ -2970,8 +3105,7 @@ function viewKeno(view) {
 
   const homeBtn = el(`<button class="j6-iconbtn keno-display-icon" data-fk="home" aria-label="Leave Keno and go back to all games" style="left:${KENO_ICONS.home.x}%;top:${KENO_ICONS.home.y}%"><svg aria-hidden="true" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5.5 9.5V20h13V9.5"/></svg></button>`);
   homeBtn.onclick = () => { if (locked) return; currentGameId = null; kenoState = null; render(); };
-  const soundBtn = el(`<button class="j6-iconbtn keno-display-icon" data-fk="sound" aria-pressed="${soundEnabled}" aria-label="Sound" style="left:${KENO_ICONS.sound.x}%;top:${KENO_ICONS.sound.y}%">${soundEnabled ? `<svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6.5 9H3v6h3.5L11 19z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.8a9 9 0 0 1 0 12.4"/></svg>` : `<svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6.5 9H3v6h3.5L11 19z"/><path d="m16 9.5 5 5"/><path d="m21 9.5-5 5"/></svg>`}</button>`);
-  soundBtn.onclick = () => { soundEnabled = !soundEnabled; announce(soundEnabled ? "Sound on" : "Sound off"); refresh(); };
+  const soundBtn = soundIconBtn("keno-display-icon", `left:${KENO_ICONS.sound.x}%;top:${KENO_ICONS.sound.y}%`);
   dispWrap.append(homeBtn, soundBtn);
 
   // The art and the draw read-out share one positioned stage: wide, the panel
@@ -3013,6 +3147,7 @@ function viewKeno(view) {
       }
       S.luckyN = Math.max(1, S.picks.length || S.luckyN);
       S.lastRound = null;
+      sfx.tap();
       refresh();
       announce(kenoPickSentence(S, cfg));
     };
@@ -3167,6 +3302,7 @@ function viewKeno(view) {
       S.drawing = false;
       S.lastRound = round;
       render();
+      round.win > 0 ? sfx.win() : sfx.lose();
       const msg = round.win > 0 ? `Won ${nice(round.win)} points!` : "No win this time";
       toast(msg, round.win > 0 ? "ok" : "");
       announce(round.win > 0
@@ -3231,7 +3367,7 @@ async function animateKenoDraw(round, S, cfg) {
   const land = (n) => {
     const isHit = picks.has(n);
     if (drawPanel) drawPanel.appendChild(kenoChip(n, isHit, true));
-    if (isHit) markHit(n);
+    if (isHit) { markHit(n); sfx.chip(); }
     announce(`${n}${isHit ? ", your number" : ""}`);
   };
 
@@ -3240,11 +3376,13 @@ async function animateKenoDraw(round, S, cfg) {
 
   wrap.classList.add("drawing");
   kenoDrumStart(wrap.querySelector(".keno-drum-balls"));
+  sfx.spin();
   await wait(KENO_PREROLL_MS);         // balls churning, nothing drawn yet
 
   for (const n of round.drawn) {
     reveal.textContent = n;
     reveal.className = "keno-reveal kball show";
+    sfx.land();
     await wait(KENO_HOLD_MS);
     reveal.className = "keno-reveal kball show fade";
     await wait(KENO_FADE_MS);
@@ -3652,7 +3790,7 @@ function viewJust6(view) {
   const cfg = game.config;
   const me = api.player.me(session.userId);
   if (!kenoState || kenoState.gameId !== "just6")
-    kenoState = { gameId: "just6", picks: [], stake: 1, busy: false, lastRound: null, side: {}, drawing: false, showResults: false };
+    kenoState = { gameId: "just6", picks: [], stake: cfg.defaultStake ?? cfg.minStake, busy: false, lastRound: null, side: {}, drawing: false, showResults: false };
   const S = kenoState;
   const R = S.lastRound;
 
@@ -3714,8 +3852,7 @@ function viewJust6(view) {
   const leftIcons = el(`<div class="j6-toolbar-side"></div>`);
   const homeBtn = el(`<button class="j6-iconbtn" data-fk="home" aria-label="Leave Just 6 and go back to all games"><svg aria-hidden="true" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5.5 9.5V20h13V9.5"/></svg></button>`);
   homeBtn.onclick = () => { if (S.busy || S.drawing) return; currentGameId = null; kenoState = null; render(); };
-  const soundBtn = el(`<button class="j6-iconbtn" data-fk="sound" aria-pressed="${soundEnabled}" aria-label="Sound">${soundEnabled ? `<svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6.5 9H3v6h3.5L11 19z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.8a9 9 0 0 1 0 12.4"/></svg>` : `<svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6.5 9H3v6h3.5L11 19z"/><path d="m16 9.5 5 5"/><path d="m21 9.5-5 5"/></svg>`}</button>`);
-  soundBtn.onclick = () => { soundEnabled = !soundEnabled; announce(soundEnabled ? "Sound on" : "Sound off"); refresh(); };
+  const soundBtn = soundIconBtn();
   leftIcons.append(homeBtn, soundBtn);
 
   const playBtn = el(`<button class="j6-playpill" data-fk="play" aria-disabled="${S.busy || S.drawing || !playable}" aria-describedby="j6-playhint">${S.drawing ? "Drawing…" : S.busy ? "…" : "Play"}</button>`);
@@ -3783,6 +3920,7 @@ function viewJust6(view) {
         S.picks.push(n);
       }
       S.lastRound = null;
+      sfx.tap();
       refresh();
       announce(just6CostSentence(S, cfg));
     };
@@ -3912,6 +4050,7 @@ function viewJust6(view) {
       S.lastRound = round;
       S.showResults = true;
       render();
+      round.win > 0 ? sfx.win() : sfx.lose();
       const msg = round.win > 0 ? `Won ${nice(round.win)} points!` : "No win this time";
       toast(msg, round.win > 0 ? "ok" : "");
       announce(round.win > 0 ? `Draw complete. You won ${nice(round.win)} points.` : "Draw complete. No win this time.");
@@ -4020,9 +4159,11 @@ async function animateJust6(round, cfg, S) {
       slot.classList.add("j6-ball", "land");
       if (isHit) slot.classList.add("hit");
     }
+    if (isHit) sfx.chip();
     announce(`${just6PosLabel(pos, cfg)}: ${n}${isHit ? ", your number" : ""}`);
   };
 
+  sfx.spin();
   if (!reduce) await wait(J6_PREROLL_MS);      // balls churning, nothing drawn yet
 
   for (let i = 0; i < round.drawn.length; i++) {
@@ -4034,6 +4175,7 @@ async function animateJust6(round, cfg, S) {
       reveal.className = "j6-ball j6-reveal out";                // the ball clears the port
       await wait(J6_OUT_MS);
       reveal.className = "j6-ball j6-reveal show";               // and swells over the glass
+      sfx.land();
       await wait(J6_GROW_MS * 0.5);
       if (hatch) hatch.classList.remove("open");                 // port shuts behind it
       await wait(J6_GROW_MS * 0.5 + J6_HOLD_MS);                 // hold, long enough to read
@@ -4150,7 +4292,7 @@ function viewHotDice(view) {
   const cfg = game.config;
   const me = api.player.me(session.userId);
   if (!kenoState || kenoState.gameId !== "hotdice")
-    kenoState = { gameId: "hotdice", slip: {}, chip: 5, busy: false, lastRound: null, auto: false, autoLeft: 0, locked: false, focusKey: "3" };
+    kenoState = { gameId: "hotdice", slip: {}, chip: cfg.defaultChip ?? cfg.minStake, busy: false, lastRound: null, auto: false, autoLeft: 0, locked: false, focusKey: "3" };
   const S = kenoState;
   const R = S.lastRound;
   const locked = S.busy || S.locked;
@@ -4174,6 +4316,7 @@ function viewHotDice(view) {
     if (locked) return;
     S.slip[key] = Math.min(cfg.maxStake, (S.slip[key] || 0) + S.chip);
     S.lastRound = null;
+    sfx.chip();
     refresh();
     announce(`${hotDiceSpotLabel(key)}: ${S.slip[key]} points staked. ${hotDiceSlipSentence(S)}`);
   };
@@ -4207,8 +4350,7 @@ function viewHotDice(view) {
   stageWrap.appendChild(zoom);
   const homeBtn = el(`<button class="j6-iconbtn hd-stage-icon" data-fk="home" aria-label="Leave Hot Dice and go back to all games" style="left:89%;top:10%"><svg aria-hidden="true" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5.5 9.5V20h13V9.5"/></svg></button>`);
   homeBtn.onclick = () => { if (locked) return; currentGameId = null; kenoState = null; render(); };
-  const soundBtn = el(`<button class="j6-iconbtn hd-stage-icon" data-fk="sound" aria-pressed="${soundEnabled}" aria-label="Sound" style="left:97%;top:10%">${soundEnabled ? `<svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6.5 9H3v6h3.5L11 19z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.8a9 9 0 0 1 0 12.4"/></svg>` : `<svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6.5 9H3v6h3.5L11 19z"/><path d="m16 9.5 5 5"/><path d="m21 9.5-5 5"/></svg>`}</button>`);
-  soundBtn.onclick = () => { soundEnabled = !soundEnabled; announce(soundEnabled ? "Sound on" : "Sound off"); refresh(); };
+  const soundBtn = soundIconBtn("hd-stage-icon", "left:97%;top:10%");
   stageWrap.append(homeBtn, soundBtn);
   cab.appendChild(stageWrap);
 
@@ -4385,6 +4527,7 @@ function viewHotDice(view) {
       S.lastRound = round;
       if (S.autoLeft > 0) { S.autoLeft--; if (S.autoLeft === 0) S.locked = false; }
       render();
+      round.win > 0 ? sfx.win() : sfx.lose();
       const d = round.breakdown.dice;
       toast(round.win > 0 ? `Won ${nice(round.win)} points!` : "No win", round.win > 0 ? "ok" : "");
       announce(`Rolled ${d.slice(0, -1).join(", ")} and ${d[d.length - 1]}. Total ${round.breakdown.total}. ${round.win > 0 ? `You won ${nice(round.win)} points.` : "No win."}`);
@@ -4450,7 +4593,7 @@ function viewBig3(view) {
   const cfg = game.config;
   const me = api.player.me(session.userId);
   if (!kenoState || kenoState.gameId !== "big3")
-    kenoState = { gameId: "big3", slip: {}, chip: 5, busy: false, spinning: false, lastRound: null,
+    kenoState = { gameId: "big3", slip: {}, chip: cfg.defaultChip ?? cfg.minStake, busy: false, spinning: false, lastRound: null,
       auto: false, open: {}, fc: [null, null], rfc: [null, null], tc: [null, null, null], rtc: [null, null, null] };
   const S = kenoState;
   const R = S.lastRound;
@@ -4475,6 +4618,7 @@ function viewBig3(view) {
     if (locked) return;
     S.slip[key] = Math.min(cfg.maxStake, (S.slip[key] || 0) + S.chip);
     S.lastRound = null;
+    sfx.chip();
     refresh();
     announce(`${label}: ${S.slip[key]} points. ${big3SlipSentence(S)}`);
   };
@@ -4495,7 +4639,10 @@ function viewBig3(view) {
   homeBtn.onclick = () => { if (locked) return; currentGameId = null; kenoState = null; render(); };
   const oddsBtn = el(`<button class="b3-iconbtn" data-fk="odds" aria-label="Odds and rules"><svg aria-hidden="true" viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v2.6M12 18.6v2.6M4.5 12H1.9M22.1 12h-2.6M6.7 6.7 4.9 4.9M19.1 19.1l-1.8-1.8M17.3 6.7l1.8-1.8M4.9 19.1l1.8-1.8"/></svg></button>`);
   oddsBtn.onclick = () => openBig3Odds(game, cfg);
-  head.append(homeBtn, el(`<h1 class="b3-wordmark">Big3</h1>`), oddsBtn);
+  const soundBtn = soundIconBtn(null, null, "b3-iconbtn");
+  const rightIcons = el(`<div class="b3-headicons"></div>`);
+  rightIcons.append(soundBtn, oddsBtn);
+  head.append(homeBtn, el(`<h1 class="b3-wordmark">Big3</h1>`), rightIcons);
   cab.appendChild(head);
 
   /* ---------- the machine ---------- */
@@ -4557,10 +4704,26 @@ function viewBig3(view) {
     const vals = S[stateKey];
     for (let i = 0; i < n; i++) {
       const id = `b3-${stateKey}-${i}`;
-      const lab = el(`<label for="${id}">${anyOrder ? `Number ${i + 1}` : ["First", "Second", "Third"][i]}</label>`);
+      // Nesting the select inside the label is enough on its own to associate
+      // them — a `for` pointing at the same id as well is redundant, and on
+      // some browsers a click on the label then fires the activation twice
+      // (once via nesting, once via the id lookup), which for a native
+      // <select> can mean it opens and immediately closes again.
+      const lab = el(`<label>${anyOrder ? `Number ${i + 1}` : ["First", "Second", "Third"][i]}</label>`);
       const sel = el(`<select id="${id}" data-fk="sel-${stateKey}-${i}" ${locked ? "disabled" : ""}><option value="">–</option>${range(0, 9).map((d) => `<option value="${d}">${d}</option>`).join("")}</select>`);
       sel.value = vals[i] ?? "";
-      sel.onchange = () => { vals[i] = sel.value === "" ? null : Number(sel.value); refresh(); };
+      // A full refresh() here tears down and rebuilds every select in this
+      // panel on every single pick — including the two the player hasn't
+      // touched yet — which is three teardowns to fill a Tri-cast bet against
+      // two for a Forecast. Update in place instead: touch only the Add
+      // button's state, leave the other selects (and the browser's own
+      // mid-interaction focus) alone.
+      sel.onchange = () => {
+        vals[i] = sel.value === "" ? null : Number(sel.value);
+        sfx.select();
+        const nowReady = vals.every((v) => v != null) && new Set(vals.filter((v) => v != null)).size === n;
+        add.setAttribute("aria-disabled", String(!nowReady || locked));
+      };
       lab.appendChild(sel);
       row.appendChild(lab);
     }
@@ -4673,6 +4836,7 @@ function viewBig3(view) {
       S.spinning = false;
       S.lastRound = round;
       render();
+      round.win > 0 ? sfx.win() : sfx.lose();
       const msg = round.win > 0 ? `Won ${nice(round.win)} points!` : "No win this time";
       toast(msg, round.win > 0 ? "ok" : "");
       announce(`Reels: ${round.drawn.join(", ")}. ${round.win > 0 ? `You won ${nice(round.win)} points.` : "No win."}`);
@@ -4716,9 +4880,9 @@ function openBig3Odds(game, cfg) {
   const body = el(`<div class="stack"></div>`);
   body.appendChild(el(`<p class="muted" style="line-height:1.6">${esc(game.blurb)} Each reel keeps its own animal and spins through 0–9, stopping left to right. Open a market, tap a number to stack your chip on it, and press Backspace on it (or right-click) to take it off. You can hold as many bets at once as you like.</p>`));
   const rows = big3RTP(cfg);
-  const t = el(`<div style="overflow-x:auto"><table class="paytable-mini"><thead><tr><th>Bet</th><th>Chance</th><th>Pays</th><th>Return</th></tr></thead><tbody></tbody></table></div>`);
+  const t = el(`<div style="overflow-x:auto"><table class="paytable-mini"><thead><tr><th>Bet</th><th>Pays</th><th>Return</th></tr></thead><tbody></tbody></table></div>`);
   rows.forEach((r) => t.querySelector("tbody").appendChild(el(
-    `<tr><td style="text-align:left">${esc(r.bet)}</td><td>${(r.prob * 100).toFixed(1)}%</td><td>${r.pay}×</td><td style="color:var(--violet)">${(r.rtp * 100).toFixed(1)}%</td></tr>`)));
+    `<tr><td style="text-align:left">${esc(r.bet)}</td><td>${r.pay}×</td><td style="color:var(--violet)">${(r.rtp * 100).toFixed(1)}%</td></tr>`)));
   body.appendChild(t);
   const h = api.player.history(session.userId, "big3", 12);
   if (h.length) {
@@ -4744,6 +4908,7 @@ async function animateBig3(round) {
   const readout = document.querySelector("[data-readout]");
   const land = (i) => {
     const r = BIG3_REELS[i];
+    sfx.land();
     announce(`${r.ord}: ${round.drawn[i]}`);
   };
 
@@ -4757,6 +4922,7 @@ async function animateBig3(round) {
     return;
   }
 
+  sfx.spin();
   const spins = reelEls.map((reel, i) => {
     const strip = reel.querySelector("[data-strip]");
     const target = round.drawn[i];
@@ -4868,6 +5034,7 @@ async function animateHotDice(round) {
 
   let raf = 0, last = performance.now(), scramble = 0;
   scramble = setInterval(() => bodies.forEach((b) => (b.el.innerHTML = dieFaceHTML(1 + Math.floor(Math.random() * 6)))), 70);
+  sfx.roll();
 
   const tick = (ts) => {
     const dt = Math.min((ts - last) / 1000, 0.04); last = ts;
@@ -4900,6 +5067,7 @@ async function animateHotDice(round) {
   clearInterval(scramble);
 
   // settle: real faces, upright, side by side on the dome floor
+  sfx.land();
   bodies.forEach((b, i) => {
     b.el.innerHTML = dieFaceHTML(faces[i]);
     b.el.style.transition = `transform ${HD_SETTLE_MS}ms cubic-bezier(.25,1.4,.5,1)`;
@@ -5088,6 +5256,35 @@ function viewAdminDash(view) {
   view.appendChild(wrap);
 }
 
+// One "Defaults & limits" editor, shared by every game's admin card: a
+// default bet/chip (what a player's screen opens with), an optional "lucky
+// pick" count (Keno only — the other games have no equivalent quick-random
+// quantity to default), and the min/max stake that bounds both. Kept as one
+// function so the four cards can't drift into four different clamping rules.
+function adminDefaultsBlock(card, g, opts) {
+  card.appendChild(el(`<h4 style="margin:4px 0 -2px;font-size:13px">Defaults &amp; limits</h4>`));
+  const box = el(`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px"></div>`);
+  box.appendChild(field(opts.betLabel, opts.betKey, { type: "number", value: g.config[opts.betKey] ?? g.config.minStake }));
+  if (opts.lucky) box.appendChild(field(opts.lucky.label, opts.lucky.key, { type: "number", value: g.config[opts.lucky.key] ?? opts.lucky.fallback }));
+  box.appendChild(field("Min bet", "minStake", { type: "number", value: g.config.minStake }));
+  box.appendChild(field("Max bet", "maxStake", { type: "number", value: g.config.maxStake }));
+  card.appendChild(box);
+  const save = el(`<button class="btn sm primary" style="align-self:flex-start">Save defaults</button>`);
+  save.onclick = () => {
+    const f = readForm(box);
+    const minStake = Math.max(1, parseFloat(f.minStake) || 1);
+    const maxStake = Math.max(minStake, parseFloat(f.maxStake) || minStake);
+    const patch = { minStake, maxStake };
+    patch[opts.betKey] = Math.min(Math.max(parseFloat(f[opts.betKey]) || minStake, minStake), maxStake);
+    if (opts.lucky) patch[opts.lucky.key] = Math.min(Math.max(parseInt(f[opts.lucky.key], 10) || 1, 1), opts.lucky.max);
+    api.admin.updateGameConfig(g.id, patch);
+    toast(`${g.name} defaults saved`, "ok");
+    render();
+  };
+  card.appendChild(save);
+  card.appendChild(el(`<p class="muted" style="font-size:11.5px">${opts.note}</p>`));
+}
+
 function viewAdminGames(view) {
   head(view, "Games", "Enable a game, or tune its paytable. Adding a new game = one module + one row here.");
   const games = api.admin.games();
@@ -5101,6 +5298,12 @@ function viewAdminGames(view) {
     card.appendChild(hd);
 
     if (g.id === "keno") {
+      adminDefaultsBlock(card, g, {
+        betKey: "defaultStake", betLabel: "Default bet",
+        lucky: { key: "defaultLuckyN", label: "Default lucky pick", max: g.config.maxPick, fallback: 4 },
+        note: `Default bet and default lucky pick are what a player's Keno screen opens with. Min/max bet bound every stake step and every "Random" pick — the default is clamped between them.`,
+      });
+
       const table = kenoPaytableTable(g.config, true);
       card.appendChild(table);
       const save = el(`<button class="btn sm primary" style="align-self:flex-start">Save paytable</button>`);
@@ -5119,6 +5322,11 @@ function viewAdminGames(view) {
       card.appendChild(save);
       card.appendChild(el(`<p class="muted" style="font-size:11.5px">RTP column is theoretical hold per pick level (hypergeometric on ${g.config.pool} numbers, ${g.config.draw} drawn). Spec values as written range roughly 62–95% — the maths, not a bug to fix here.</p>`));
     } else if (g.id === "just6") {
+      adminDefaultsBlock(card, g, {
+        betKey: "defaultStake", betLabel: "Default bet",
+        note: `Default bet is the stake per line a player's Just 6 screen opens with. Min/max bet bound every stake step and every speciality bet — the default is clamped between them.`,
+      });
+
       const table = just6PaytableTable(g.config, true);
       card.appendChild(table);
       const save = el(`<button class="btn sm primary" style="align-self:flex-start">Save paytable</button>`);
@@ -5145,6 +5353,11 @@ function viewAdminGames(view) {
       card.appendChild(rtpRow);
       card.appendChild(el(`<p class="muted" style="font-size:11.5px">Speciality bets: ${Object.entries(JUST6_SPECIALITIES).map(([k, s]) => `${s.label.replace(/ — .*/, "")} ${s.pay}×`).join(" · ")}. Colour is 1-in-8 paying 4.5× (≈56% RTP) — per spec.</p>`));
     } else if (g.id === "hotdice") {
+      adminDefaultsBlock(card, g, {
+        betKey: "defaultChip", betLabel: "Default chip",
+        note: `Default chip is the chip value a player's Hot Dice table opens with. Min/max bet bound every chip stack and every bet on the table — the default is clamped between them.`,
+      });
+
       const table = el(`<div style="overflow-x:auto"><table class="paytable-mini"><thead><tr><th>Total</th>${range(3, 18).map((s) => `<th>${s}</th>`).join("")}</tr></thead><tbody><tr><td style="text-align:left">Pays</td></tr></tbody></table></div>`);
       const tr = table.querySelector("tbody tr");
       for (let s = 3; s <= 18; s++) {
@@ -5165,6 +5378,11 @@ function viewAdminGames(view) {
       const best = hotDiceRTP(g.config).reduce((m, r) => Math.max(m, r.rtp), 0);
       card.appendChild(el(`<p class="muted" style="font-size:11.5px">Even-money (Small/Big, Odd/Even) ${g.config.evenMoney}× · Hard Way ${g.config.hardWay}×. Theoretical RTP across all bets ${(worst * 100).toFixed(1)}%–${(best * 100).toFixed(1)}% (3d6, 216 outcomes). Total bets as speced carry a ~31–37% edge — steep; confirm before launch. Triples ${g.config.triplesLoseEvenMoney ? "void" : "do not void"} even-money bets.</p>`));
     } else if (g.id === "big3") {
+      adminDefaultsBlock(card, g, {
+        betKey: "defaultChip", betLabel: "Default chip",
+        note: `Default chip is the chip value a player's Big 3 slip opens with. Min/max bet bound every chip stack and every bet in the slip — the default is clamped between them.`,
+      });
+
       const rows = big3RTP(g.config);
       const payKeyByBet = { "First / Second / Third (any one digit)": "single", "Show (digit in any of the 3 reels)": "show",
         "Forecast (2 digits, exact order)": "forecast", "Rev. Forecast (2 digits, either order)": "revForecast",
