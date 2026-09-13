@@ -2079,7 +2079,9 @@ const rng = {
    ------------------------------------------------------------------------- */
 const wallet = {
   balance(userId) {
-    return store.get().users.find((u) => u.id === userId)?.points ?? 0;
+    const u = store.get().users.find((x) => x.id === userId);
+    if (live.active && u?.role === "player") return live.user.points;
+    return u?.points ?? 0;
   },
   /** Post a signed amount. Throws on insufficient funds. Returns the tx row. */
   post(userId, type, amount, note, extra = {}) {
@@ -2107,6 +2109,66 @@ const wallet = {
     });
   },
 };
+
+/* ---------------------------------------------------------------------------
+   5b. LIVE — bridge to the real Postgres/Express backend
+   (numbers-galore-server) once a player signs in with a real account.
+   Deliberately isolated from the demo `store`/`wallet`/`engine` above: a live
+   session never reads or writes localStorage, and Agent/Admin stay on demo
+   data — no backend exists for those roles yet, only "player" can go live.
+   ------------------------------------------------------------------------- */
+const live = {
+  token: null,
+  user: null,   // { id, name, role, points } — points kept in sync from every /api/play response
+  get active() { return !!this.token; },
+  restore() {
+    try {
+      const t = sessionStorage.getItem("ngLiveToken");
+      const u = sessionStorage.getItem("ngLiveUser");
+      if (t && u) { this.token = t; this.user = JSON.parse(u); }
+    } catch { /* private-browsing sessionStorage can throw — just stay signed out */ }
+  },
+  async login(email, password) {
+    const res = await fetch("/api/auth/login", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Login failed");
+    this.token = data.token; this.user = data.user;
+    try {
+      sessionStorage.setItem("ngLiveToken", this.token);
+      sessionStorage.setItem("ngLiveUser", JSON.stringify(this.user));
+    } catch { /* ok to lose the session on refresh if storage is unavailable */ }
+  },
+  logout() {
+    this.token = null; this.user = null;
+    try { sessionStorage.removeItem("ngLiveToken"); sessionStorage.removeItem("ngLiveUser"); } catch {}
+  },
+  async play(gameId, selection, stake, side) {
+    const res = await fetch("/api/play", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.token}` },
+      body: JSON.stringify({ gameId, selection, stake, side }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      if (res.status === 401) this.logout();
+      throw new Error(data.error || "Something went wrong");
+    }
+    this.user.points = data.balance;
+    try { sessionStorage.setItem("ngLiveUser", JSON.stringify(this.user)); } catch {}
+    return data;
+  },
+};
+
+/** Every game view calls this instead of engine.play() directly — routes to
+    the real server once signed in live, otherwise falls back to the local
+    demo engine exactly as before. */
+async function playRound(gameId, selection, stake, side) {
+  if (live.active) return live.play(gameId, selection, stake, side);
+  return engine.play({ userId: session.userId, gameId, selection, stake, side });
+}
 
 /* ---------------------------------------------------------------------------
    6. AGENT HIERARCHY  (super → master → agent → player) — cloned from Bingo.
@@ -2527,7 +2589,9 @@ const api = {
       const d = store.get();
       const u = d.users.find((x) => x.id === userId);
       const agent = u?.agentId ? d.users.find((x) => x.id === u.agentId) : null;
-      return { ...u, agentName: agent?.name || null };
+      const out = { ...u, agentName: agent?.name || null };
+      if (live.active && u.role === "player") out.points = live.user.points;
+      return out;
     },
     games() { return store.get().games.filter((g) => g.enabled); },
     history(userId, gameId, limit = 20) {
@@ -2745,6 +2809,7 @@ function boot() {
   // There is no <html> tag in this file to hang it on — the host supplies the
   // document shell — so the page declares its language at run time.
   document.documentElement.lang = document.documentElement.lang || "en";
+  live.restore();
   const ids = api.auth.identities();
   session.userId = ids.player.id;
   session.role = "player";
@@ -2785,7 +2850,7 @@ function render() {
   const root = document.getElementById("root");
   const route = location.hash.slice(2) || "play";
   const me = store.get().users.find((u) => u.id === session.userId);
-  const bal = me.role === "admin" ? null : me.points;
+  const bal = me.role === "admin" ? null : (live.active && me.role === "player" ? live.user.points : me.points);
 
   root.innerHTML = "";
   const app = el(`<div class="app"></div>`);
@@ -2823,6 +2888,19 @@ function render() {
 
   if (bal != null) topbar.appendChild(el(`<div class="bal"><span class="k">Points</span><span class="v">${nice(bal)}</span></div>`));
   else topbar.appendChild(el(`<div style="margin-left:auto"></div>`));
+
+  if (session.role === "player") {
+    if (live.active) {
+      topbar.appendChild(el(`<span class="pill ok" title="Signed in as ${esc(live.user.name)} — this is your real balance">● LIVE</span>`));
+      const outBtn = el(`<button class="icon-btn" title="Sign out of live play">⏻</button>`);
+      outBtn.onclick = () => { live.logout(); toast("Signed out of live play", ""); render(); };
+      topbar.appendChild(outBtn);
+    } else {
+      const liveBtn = el(`<button class="btn ghost sm" title="Sign in with your real account to play for real">Play for real</button>`);
+      liveBtn.onclick = openLiveLogin;
+      topbar.appendChild(liveBtn);
+    }
+  }
 
   const themeBtn = el(`<button class="icon-btn" title="Toggle theme">◐</button>`);
   themeBtn.onclick = toggleTheme;
@@ -3301,7 +3379,7 @@ function viewKeno(view) {
     refresh();
     announce("The machine is drawing.");
     try {
-      const round = await engine.play({ userId: session.userId, gameId: "keno", selection: S.picks.slice(), stake: S.stake });
+      const round = await playRound("keno", S.picks.slice(), S.stake, null);
       S.busy = false;
       S._pendingSeed = null;
       await animateKenoDraw(round, S, cfg);
@@ -4049,7 +4127,7 @@ function viewJust6(view) {
     refresh();                                        // the machine starts turning right away
     announce("The machine is drawing.");
     try {
-      const round = await engine.play({ userId: session.userId, gameId: "just6", selection: S.picks.slice(), stake: S.stake, side });
+      const round = await playRound("just6", S.picks.slice(), S.stake, side);
       S.busy = false;
       await animateJust6(round, cfg, S);              // it keeps turning through every ball
       S.drawing = false;
@@ -4526,7 +4604,7 @@ function viewHotDice(view) {
     S.busy = true; S.rolling = true; refresh();
     announce("Rolling.");
     try {
-      const round = await engine.play({ userId: session.userId, gameId: "hotdice", selection: [], stake: 0, side: slip });
+      const round = await playRound("hotdice", [], 0, slip);
       S.busy = false;
       await animateHotDice(round);
       S.rolling = false;
@@ -4836,7 +4914,7 @@ function viewBig3(view) {
     refresh();
     announce("Reels spinning.");
     try {
-      const round = await engine.play({ userId: session.userId, gameId: "big3", selection: [], stake: 0, side: S.slip });
+      const round = await playRound("big3", [], 0, S.slip);
       S.busy = false;
       await animateBig3(round);
       S.spinning = false;
@@ -5108,6 +5186,13 @@ function viewAccount(view) {
     <div class="metric"><div class="k">Points</div><div class="v">${nice(me.points)}</div></div>
     <div class="metric"><div class="k">Status</div><div class="v" style="font-size:18px">${esc(me.status)}</div></div>
   </div>`));
+  if (live.active) {
+    // Real rounds/transactions live on the server now — there's no fetch-history
+    // endpoint yet, so rather than show the demo store's fake rows under a real
+    // balance, say plainly that history isn't wired up here yet.
+    view.appendChild(el(`<p class="muted" style="margin:14px 2px">Signed in live as ${esc(live.user.name)}. Real-money transaction history isn't shown in this view yet.</p>`));
+    return;
+  }
   const txns = api.player.transactions(session.userId, 40);
   view.appendChild(txnTable(txns));
 }
@@ -5183,6 +5268,24 @@ function openTransfer(mode, agentUserId, target) {
       if (mode === "allocate") api.agent.allocate(agentUserId, target.id, p);
       else api.agent.recall(target.id, agentUserId, p);
       toast(`${mode === "allocate" ? "Allocated" : "Recalled"} ${nice(p)} points`, "ok");
+      render();
+    },
+  });
+}
+
+function openLiveLogin() {
+  const box = el(`<div class="stack"></div>`);
+  [field("Email", "email", { type: "email", placeholder: "you@example.com" }),
+   field("Password", "password", { type: "password" })].forEach((n) => box.appendChild(n));
+  modal({
+    title: "Sign in — play for real",
+    bodyNodes: box,
+    confirmText: "Sign in",
+    async onConfirm() {
+      const f = readForm(box);
+      if (!f.email || !f.password) throw new Error("Enter your email and password");
+      await live.login(f.email, f.password);
+      toast(`Signed in as ${live.user.name} — real balance ${nice(live.user.points)} points`, "ok");
       render();
     },
   });
