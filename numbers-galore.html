@@ -2267,6 +2267,43 @@ const liveAdmin = {
   },
 };
 
+/* A third, equally independent live session for an agent account — same
+   shape and same reasoning as `liveAdmin`. There is no real agent-specific
+   backend yet (no downline/allocate/recall routes exist server-side), so
+   right now this only proves a real agent can authenticate and see their
+   own real balance; wiring the Agent console's other pages to real data is
+   separate future work, same as most of the demo Admin console still is. */
+const liveAgent = {
+  token: null,
+  user: null,
+  get active() { return !!this.token; },
+  restore() {
+    try {
+      const t = sessionStorage.getItem("ngLiveAgentToken");
+      const u = sessionStorage.getItem("ngLiveAgentUser");
+      if (t && u) { this.token = t; this.user = JSON.parse(u); }
+    } catch {}
+  },
+  async login(email, password) {
+    const res = await fetch("/api/auth/login", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Login failed");
+    if (data.user.role !== "agent") throw new Error("That account isn't an agent account");
+    this.token = data.token; this.user = data.user;
+    try {
+      sessionStorage.setItem("ngLiveAgentToken", this.token);
+      sessionStorage.setItem("ngLiveAgentUser", JSON.stringify(this.user));
+    } catch {}
+  },
+  logout() {
+    this.token = null; this.user = null;
+    try { sessionStorage.removeItem("ngLiveAgentToken"); sessionStorage.removeItem("ngLiveAgentUser"); } catch {}
+  },
+};
+
 /** Every game view calls this instead of engine.play() directly — routes to
     the real server once signed in live, otherwise falls back to the local
     demo engine exactly as before. */
@@ -2916,6 +2953,7 @@ function boot() {
   document.documentElement.lang = document.documentElement.lang || "en";
   live.restore();
   liveAdmin.restore();
+  liveAgent.restore();
   const ids = api.auth.identities();
   session.userId = ids.player.id;
   session.role = "player";
@@ -2957,7 +2995,10 @@ function render() {
   const root = document.getElementById("root");
   const route = location.hash.slice(2) || "play";
   const me = store.get().users.find((u) => u.id === session.userId);
-  const bal = me.role === "admin" ? null : (live.active && me.role === "player" ? live.user.points : me.points);
+  const bal = me.role === "admin" ? null
+    : live.active && me.role === "player" ? live.user.points
+    : liveAgent.active && me.role === "agent" ? liveAgent.user.points
+    : me.points;
 
   root.innerHTML = "";
   const app = el(`<div class="app"></div>`);
@@ -3017,6 +3058,18 @@ function render() {
     } else {
       const liveBtn = el(`<button class="btn ghost sm" title="Sign in with a real admin account to manage live requests">Live admin sign-in</button>`);
       liveBtn.onclick = () => openLiveLogin("admin");
+      topbar.appendChild(liveBtn);
+    }
+  }
+  if (session.role === "agent") {
+    if (liveAgent.active) {
+      topbar.appendChild(el(`<span class="pill ok" title="Signed in as ${esc(liveAgent.user.name)} — this is your real float">● LIVE</span>`));
+      const outBtn = el(`<button class="icon-btn" title="Sign out of live agent">⏻</button>`);
+      outBtn.onclick = () => { liveAgent.logout(); toast("Signed out of live agent", ""); render(); };
+      topbar.appendChild(outBtn);
+    } else {
+      const liveBtn = el(`<button class="btn ghost sm" title="Sign in with a real agent account">Agent sign-in</button>`);
+      liveBtn.onclick = () => openLiveLogin("agent");
       topbar.appendChild(liveBtn);
     }
   }
@@ -5510,7 +5563,9 @@ function openLiveLogin(kind = "player") {
   [field("Email", "email", { type: "email", placeholder: "you@example.com" }),
    field("Password", "password", { type: "password" })].forEach((n) => box.appendChild(n));
   modal({
-    title: kind === "admin" ? "Sign in — manage live requests" : "Sign in — play for real",
+    title: kind === "admin" ? "Sign in — manage live requests"
+      : kind === "agent" ? "Sign in — real agent account"
+      : "Sign in — play for real",
     bodyNodes: box,
     confirmText: "Sign in",
     async onConfirm() {
@@ -5519,6 +5574,9 @@ function openLiveLogin(kind = "player") {
       if (kind === "admin") {
         await liveAdmin.login(f.email, f.password);
         toast(`Signed in as ${liveAdmin.user.name} (admin)`, "ok");
+      } else if (kind === "agent") {
+        await liveAgent.login(f.email, f.password);
+        toast(`Signed in as ${liveAgent.user.name} — real balance ${nice(liveAgent.user.points)} points`, "ok");
       } else {
         await live.login(f.email, f.password);
         toast(`Signed in as ${live.user.name} — real balance ${nice(live.user.points)} points`, "ok");
