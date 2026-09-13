@@ -2160,6 +2160,28 @@ const live = {
     try { sessionStorage.setItem("ngLiveUser", JSON.stringify(this.user)); } catch {}
     return data;
   },
+  async history(gameId, limit) {
+    const res = await fetch(`/api/history/rounds?gameId=${encodeURIComponent(gameId)}&limit=${limit}`, {
+      headers: { Authorization: `Bearer ${this.token}` },
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Couldn't load history");
+    // `hits` isn't a stored column (it's derivable from selection ∩ drawn) —
+    // recompute it here so every existing history view can keep reading
+    // `r.hits` exactly like it does for demo rounds, unchanged.
+    return data.map((r) => ({
+      ...r, detail: r.detail || "",
+      hits: Array.isArray(r.selection) ? r.selection.filter((n) => (r.drawn || []).includes(n)) : [],
+    }));
+  },
+  async transactions(limit) {
+    const res = await fetch(`/api/history/transactions?limit=${limit}`, {
+      headers: { Authorization: `Bearer ${this.token}` },
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Couldn't load transactions");
+    return data;
+  },
 };
 
 /** Every game view calls this instead of engine.play() directly — routes to
@@ -3415,21 +3437,37 @@ function kenoChip(n, isHit, animate) {
   return chip;
 }
 
+function kenoMineStrip(mine) {
+  const frag = el(`<div></div>`);
+  if (!mine.length) return frag;
+  frag.appendChild(el(`<div class="f">Your last ${mine.length} play${mine.length === 1 ? "" : "s"}</div>`));
+  const strip = el(`<div class="hist-strip"></div>`);
+  mine.forEach((r) => strip.appendChild(el(`<span class="hchip ${r.win > 0 ? "w" : ""}" title="${fmtTime(r.ts)} · ${r.hits.length}/${r.selection.length}">${r.win > 0 ? "+" + nice(r.win) : "−" + nice(r.stake)}</span>`)));
+  frag.appendChild(strip);
+  return frag;
+}
+
 function openKenoDraws() {
   const body = el(`<div class="stack"></div>`);
+  modal({ title: "Keno — last 10 draws", bodyNodes: body, confirmText: "Close", onConfirm() {} });
+  if (live.active) {
+    // The "everyone's recent draws" ticker is a demo-only flourish (it reads
+    // every player's rounds, which a live JWT can't do) — a signed-in player
+    // just sees their own real history here instead.
+    body.appendChild(el(`<p class="muted">Loading your history…</p>`));
+    live.history("keno", 10).then((mine) => {
+      body.innerHTML = "";
+      if (!mine.length) body.appendChild(el(`<p class="muted">Your plays will show here.</p>`));
+      else body.appendChild(kenoMineStrip(mine));
+    }).catch((e) => { body.innerHTML = ""; body.appendChild(el(`<p class="muted">Couldn't load history: ${esc(e.message)}</p>`)); });
+    return;
+  }
   const recent = api.player.recentDraws("keno", 10);
   if (!recent.length) body.appendChild(el(`<p class="muted">No draws yet.</p>`));
   else recent.forEach((r) => body.appendChild(el(
     `<div><div class="muted" style="font-size:11px">${fmtTime(r.ts)}</div><div class="mono" style="font-size:12.5px">${r.drawn.join(" · ")}</div></div>`)));
   const mine = api.player.history(session.userId, "keno", 10);
-  if (mine.length) {
-    body.appendChild(el(`<hr class="sep">`));
-    body.appendChild(el(`<div class="f">Your last ${mine.length} play${mine.length === 1 ? "" : "s"}</div>`));
-    const strip = el(`<div class="hist-strip"></div>`);
-    mine.forEach((r) => strip.appendChild(el(`<span class="hchip ${r.win > 0 ? "w" : ""}" title="${fmtTime(r.ts)} · ${r.hits.length}/${r.selection.length}">${r.win > 0 ? "+" + nice(r.win) : "−" + nice(r.stake)}</span>`)));
-    body.appendChild(strip);
-  }
-  modal({ title: "Keno — last 10 draws", bodyNodes: body, confirmText: "Close", onConfirm() {} });
+  if (mine.length) { body.appendChild(el(`<hr class="sep">`)); body.appendChild(kenoMineStrip(mine)); }
 }
 
 // Per ball: it swells in front of the sphere, holds long enough to read, fades,
@@ -4177,36 +4215,50 @@ function just6ClearForNextBet(S) {
     : "Board cleared, ready for the next bet.");
 }
 
+function renderJust6WinHistory(body, h) {
+  body.innerHTML = "";
+  if (!h.length) { body.appendChild(el(`<p class="muted">Your plays will show here.</p>`)); return; }
+  const strip = el(`<div class="hist-strip"></div>`);
+  h.forEach((r) => strip.appendChild(el(`<span class="hchip ${r.win > 0 ? "w" : ""}" title="${fmtTime(r.ts)} · ${esc(r.detail || "")}">${r.win > 0 ? "+" + nice(r.win) : "−" + nice(r.stake)}</span>`)));
+  body.appendChild(strip);
+}
 function openJust6History() {
   const body = el(`<div class="stack"></div>`);
-  const h = api.player.history(session.userId, "just6", 20);
-  if (!h.length) body.appendChild(el(`<p class="muted">Your plays will show here.</p>`));
-  else {
-    const strip = el(`<div class="hist-strip"></div>`);
-    h.forEach((r) => strip.appendChild(el(`<span class="hchip ${r.win > 0 ? "w" : ""}" title="${fmtTime(r.ts)} · ${esc(r.detail || "")}">${r.win > 0 ? "+" + nice(r.win) : "−" + nice(r.stake)}</span>`)));
-    body.appendChild(strip);
-  }
   modal({ title: "Just 6 — win history", bodyNodes: body, confirmText: "Close", onConfirm() {} });
+  if (live.active) {
+    body.appendChild(el(`<p class="muted">Loading…</p>`));
+    live.history("just6", 20).then((h) => renderJust6WinHistory(body, h))
+      .catch((e) => { body.innerHTML = ""; body.appendChild(el(`<p class="muted">Couldn't load history: ${esc(e.message)}</p>`)); });
+    return;
+  }
+  renderJust6WinHistory(body, api.player.history(session.userId, "just6", 20));
 }
 
+function renderJust6ResultHistory(body, h) {
+  body.innerHTML = "";
+  if (!h.length) { body.appendChild(el(`<p class="muted">Your draws will show here.</p>`)); return; }
+  h.forEach((r) => {
+    const row = el(`<div class="j6-rhrow"></div>`);
+    row.appendChild(el(`<div class="j6-rhtime muted">${esc(fmtTime(r.ts))}</div>`));
+    const balls = el(`<div class="j6-rhballs" aria-label="Numbers drawn, in order"></div>`);
+    (r.drawn || []).forEach((n, i) => balls.appendChild(j6Ball(n, {
+      cls: i < 5 ? "pre" : "", size: "22px",
+      label: `${i < 5 ? "Pre-number" : "Ball"} ${i + 1}: ${n}`,
+    })));
+    row.appendChild(balls);
+    body.appendChild(row);
+  });
+}
 function openJust6ResultHistory() {
   const body = el(`<div class="stack"></div>`);
-  const h = api.player.history(session.userId, "just6", 20);
-  if (!h.length) body.appendChild(el(`<p class="muted">Your draws will show here.</p>`));
-  else {
-    h.forEach((r) => {
-      const row = el(`<div class="j6-rhrow"></div>`);
-      row.appendChild(el(`<div class="j6-rhtime muted">${esc(fmtTime(r.ts))}</div>`));
-      const balls = el(`<div class="j6-rhballs" aria-label="Numbers drawn, in order"></div>`);
-      (r.drawn || []).forEach((n, i) => balls.appendChild(j6Ball(n, {
-        cls: i < 5 ? "pre" : "", size: "22px",
-        label: `${i < 5 ? "Pre-number" : "Ball"} ${i + 1}: ${n}`,
-      })));
-      row.appendChild(balls);
-      body.appendChild(row);
-    });
-  }
   modal({ title: "Just 6 — result history", bodyNodes: body, confirmText: "Close", onConfirm() {}, wide: true });
+  if (live.active) {
+    body.appendChild(el(`<p class="muted">Loading…</p>`));
+    live.history("just6", 20).then((h) => renderJust6ResultHistory(body, h))
+      .catch((e) => { body.innerHTML = ""; body.appendChild(el(`<p class="muted">Couldn't load history: ${esc(e.message)}</p>`)); });
+    return;
+  }
+  renderJust6ResultHistory(body, api.player.history(session.userId, "just6", 20));
 }
 
 /* ---------------------------------------------------------------------------
@@ -4968,15 +5020,20 @@ function openBig3Odds(game, cfg) {
   rows.forEach((r) => t.querySelector("tbody").appendChild(el(
     `<tr><td style="text-align:left">${esc(r.bet)}</td><td>${r.pay}×</td><td style="color:var(--violet)">${(r.rtp * 100).toFixed(1)}%</td></tr>`)));
   body.appendChild(t);
-  const h = api.player.history(session.userId, "big3", 12);
-  if (h.length) {
-    body.appendChild(el(`<hr class="sep">`));
-    body.appendChild(el(`<div class="f">Your last ${h.length} spins</div>`));
+  const histBox = el(`<div></div>`);
+  body.appendChild(histBox);
+  const paintSpins = (h) => {
+    histBox.innerHTML = "";
+    if (!h.length) return;
+    histBox.appendChild(el(`<hr class="sep">`));
+    histBox.appendChild(el(`<div class="f">Your last ${h.length} spins</div>`));
     const strip = el(`<div class="hist-strip"></div>`);
     h.forEach((r) => strip.appendChild(el(`<span class="hchip ${r.win > 0 ? "w" : ""}" title="${fmtTime(r.ts)}">${(r.drawn || []).join("-")} · ${r.win > 0 ? "+" + nice(r.win) : "−" + nice(r.stake)}</span>`)));
-    body.appendChild(strip);
-  }
+    histBox.appendChild(strip);
+  };
   modal({ title: "Big 3 — odds and rules", bodyNodes: body, confirmText: "Close", onConfirm() {}, wide: true });
+  if (live.active) live.history("big3", 12).then(paintSpins).catch(() => {});
+  else paintSpins(api.player.history(session.userId, "big3", 12));
 }
 
 /* ---------------------------------------------------------------------------
@@ -5065,15 +5122,20 @@ function openHotDiceOdds(game, cfg) {
   rows.forEach((r) => t.querySelector("tbody").appendChild(el(
     `<tr><td style="text-align:left">${esc(hotDiceSpotLabel(r.bet) || r.bet)}</td><td>${(r.prob * 100).toFixed(1)}%</td><td>${r.pay}×</td><td style="color:var(--violet)">${(r.rtp * 100).toFixed(1)}%</td></tr>`)));
   body.appendChild(t);
-  const h = api.player.history(session.userId, "hotdice", 12);
-  if (h.length) {
-    body.appendChild(el(`<hr class="sep">`));
-    body.appendChild(el(`<div class="f">Your last ${h.length} rolls</div>`));
+  const histBox = el(`<div></div>`);
+  body.appendChild(histBox);
+  const paintRolls = (h) => {
+    histBox.innerHTML = "";
+    if (!h.length) return;
+    histBox.appendChild(el(`<hr class="sep">`));
+    histBox.appendChild(el(`<div class="f">Your last ${h.length} rolls</div>`));
     const strip = el(`<div class="hist-strip"></div>`);
     h.forEach((r) => strip.appendChild(el(`<span class="hchip ${r.win > 0 ? "w" : ""}" title="${fmtTime(r.ts)}">${(r.breakdown?.dice || []).join("-") || "?"} · ${r.win > 0 ? "+" + nice(r.win) : "−" + nice(r.stake)}</span>`)));
-    body.appendChild(strip);
-  }
+    histBox.appendChild(strip);
+  };
   modal({ title: "Hot Dice — odds and rules", bodyNodes: body, confirmText: "Close", onConfirm() {}, wide: true });
+  if (live.active) live.history("hotdice", 12).then(paintRolls).catch(() => {});
+  else paintRolls(api.player.history(session.userId, "hotdice", 12));
 }
 
 /* ---------------------------------------------------------------------------
@@ -5187,10 +5249,25 @@ function viewAccount(view) {
     <div class="metric"><div class="k">Status</div><div class="v" style="font-size:18px">${esc(me.status)}</div></div>
   </div>`));
   if (live.active) {
-    // Real rounds/transactions live on the server now — there's no fetch-history
-    // endpoint yet, so rather than show the demo store's fake rows under a real
-    // balance, say plainly that history isn't wired up here yet.
-    view.appendChild(el(`<p class="muted" style="margin:14px 2px">Signed in live as ${esc(live.user.name)}. Real-money transaction history isn't shown in this view yet.</p>`));
+    const holder = el(`<div></div>`);
+    holder.appendChild(el(`<p class="muted" style="margin:14px 2px">Loading your real transaction history…</p>`));
+    view.appendChild(holder);
+    live.transactions(40).then((txns) => {
+      holder.innerHTML = "";
+      holder.appendChild(txnTable(txns));
+      // The cached balance only moves when THIS browser plays a round — if
+      // another tab/device on the same account played meanwhile, the header
+      // can lag the real number. The ledger is always authoritative, so
+      // resync from its most recent row whenever we have one in hand.
+      if (txns.length && txns[0].balanceAfter !== live.user.points) {
+        live.user.points = txns[0].balanceAfter;
+        try { sessionStorage.setItem("ngLiveUser", JSON.stringify(live.user)); } catch {}
+        render();
+      }
+    }).catch((e) => {
+      holder.innerHTML = "";
+      holder.appendChild(el(`<p class="muted" style="margin:14px 2px">Couldn't load history: ${esc(e.message)}</p>`));
+    });
     return;
   }
   const txns = api.player.transactions(session.userId, 40);
