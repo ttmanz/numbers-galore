@@ -2327,6 +2327,54 @@ const liveAgent = {
     this.token = null; this.user = null;
     try { sessionStorage.removeItem("ngLiveAgentToken"); sessionStorage.removeItem("ngLiveAgentUser"); } catch {}
   },
+  async me() {
+    const res = await fetch("/api/agent/me", { headers: { Authorization: `Bearer ${this.token}` } });
+    const data = await res.json();
+    if (!res.ok) { if (res.status === 401) this.logout(); throw new Error(data.error || "Couldn't load profile"); }
+    this.user.points = data.points;
+    try { sessionStorage.setItem("ngLiveAgentUser", JSON.stringify(this.user)); } catch {}
+    return data;
+  },
+  async downline() {
+    const res = await fetch("/api/agent/downline", { headers: { Authorization: `Bearer ${this.token}` } });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Couldn't load downline");
+    return data;
+  },
+  async createPlayer(name, email, password, startingPoints) {
+    const res = await fetch("/api/agent/players", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.token}` },
+      body: JSON.stringify({ name, email, password, startingPoints }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Couldn't create player");
+    return data;
+  },
+  async allocate(playerId, amount, note) {
+    const res = await fetch("/api/agent/allocate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.token}` },
+      body: JSON.stringify({ playerId, amount, note }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Couldn't allocate");
+    this.user.points = data.agentBalance;
+    try { sessionStorage.setItem("ngLiveAgentUser", JSON.stringify(this.user)); } catch {}
+    return data;
+  },
+  async recall(playerId, amount, note) {
+    const res = await fetch("/api/agent/recall", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.token}` },
+      body: JSON.stringify({ playerId, amount, note }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Couldn't recall");
+    this.user.points = data.agentBalance;
+    try { sessionStorage.setItem("ngLiveAgentUser", JSON.stringify(this.user)); } catch {}
+    return data;
+  },
 };
 
 /** Every game view calls this instead of engine.play() directly — routes to
@@ -5549,6 +5597,7 @@ function txnTable(txns) {
    AGENT — downline
    ========================================================================= */
 function viewAgent(view) {
+  if (liveAgent.active) { viewAgentLive(view); return; }
   const me = api.agent.me(session.userId);
   const dl = api.agent.downline(session.userId);
   const canSub = KIND_CHILD[me.kind] && KIND_CHILD[me.kind] !== "player";
@@ -5600,6 +5649,98 @@ function openTransfer(mode, agentUserId, target) {
       else api.agent.recall(target.id, agentUserId, p);
       toast(`${mode === "allocate" ? "Allocated" : "Recalled"} ${nice(p)} points`, "ok");
       render();
+    },
+  });
+}
+
+/* =========================================================================
+   AGENT — real downline (requires `liveAgent`). Direct downline only (no
+   multi-tier sub-agent tree yet) — a real agent can create real players
+   under themselves and allocate/recall real points. Completely separate
+   render path from the demo Downline above; nothing here touches `store`.
+   ========================================================================= */
+function viewAgentLive(view) {
+  const addBtn = el(`<button class="btn primary sm">+ New player</button>`);
+  const content = el(`<div></div>`);
+  content.appendChild(el(`<p class="muted" style="padding:24px 2px">Loading your real downline…</p>`));
+
+  async function reload() {
+    content.innerHTML = "";
+    content.appendChild(el(`<p class="muted" style="padding:24px 2px">Loading your real downline…</p>`));
+    try {
+      const [me, dl] = await Promise.all([liveAgent.me(), liveAgent.downline()]);
+      content.innerHTML = "";
+      content.appendChild(el(`<div class="grid-metrics">
+        <div class="metric"><div class="k">Points on hand</div><div class="v">${nice(me.points)}</div></div>
+        <div class="metric"><div class="k">Players</div><div class="v">${me.playerCount}</div></div>
+        <div class="metric"><div class="k">Commission</div><div class="v">${me.commissionRate}%</div></div>
+      </div>`));
+      const wrap = el(`<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Name</th><th>Role</th><th>Email</th><th style="text-align:right">Points</th><th style="text-align:right">Actions</th></tr></thead><tbody></tbody></table></div>`);
+      const tb = wrap.querySelector("tbody");
+      if (!dl.length) tb.appendChild(el(`<tr><td colspan="5" class="muted" style="text-align:center;padding:24px">No players yet — create one to allocate points.</td></tr>`));
+      dl.forEach((u) => {
+        const tr = el(`<tr>
+          <td><b>${esc(u.name)}</b></td>
+          <td><span class="pill dim">${esc(u.role)}</span></td>
+          <td class="muted">${esc(u.email || "—")}</td>
+          <td class="mono" style="text-align:right">${nice(u.points)}</td>
+          <td style="text-align:right"></td>
+        </tr>`);
+        const actionsTd = tr.lastElementChild;
+        const allocBtn = el(`<button class="btn sm">Allocate</button>`);
+        allocBtn.onclick = () => openLiveTransfer("allocate", u, reload);
+        const recallBtn = el(`<button class="btn sm ghost">Recall</button>`);
+        recallBtn.onclick = () => openLiveTransfer("recall", u, reload);
+        actionsTd.append(allocBtn, " ", recallBtn);
+        tb.appendChild(tr);
+      });
+      content.appendChild(wrap);
+    } catch (e) {
+      content.innerHTML = "";
+      content.appendChild(el(`<p class="muted" style="padding:24px 2px">Couldn't load: ${esc(e.message)}</p>`));
+    }
+  }
+  addBtn.onclick = () => openCreateLivePlayer(reload);
+
+  head(view, "Downline", "Real players you've recruited — allocate or recall their points.", addBtn);
+  view.appendChild(content);
+  reload();
+}
+
+function openCreateLivePlayer(done) {
+  const box = el(`<div class="stack"></div>`);
+  [field("Name", "name"),
+   field("Email", "email", { type: "email", placeholder: "you@example.com" }),
+   field("Password", "password", { type: "password", placeholder: "at least 6 characters" }),
+   field("Starting points (optional)", "startingPoints", { type: "number", placeholder: "0" })].forEach((n) => box.appendChild(n));
+  modal({
+    title: "New player",
+    bodyNodes: box,
+    confirmText: "Create",
+    async onConfirm() {
+      const f = readForm(box);
+      if (!f.name) throw new Error("Enter a name");
+      if (!f.email || !f.password) throw new Error("Enter an email and password");
+      await liveAgent.createPlayer(f.name, f.email, f.password, Number(f.startingPoints) || 0);
+      toast(`${f.name} created`, "ok");
+      done && done();
+    },
+  });
+}
+
+function openLiveTransfer(mode, player, done) {
+  const amt = field(mode === "allocate" ? "Points to allocate" : "Points to recall", "points", { type: "number", placeholder: "0" });
+  modal({
+    title: `${mode === "allocate" ? "Allocate to" : "Recall from"} ${player.name}`,
+    bodyNodes: [el(`<p class="muted">${mode === "allocate" ? "Moves points from your balance to theirs." : "Moves points from their balance back to yours."}</p>`), amt],
+    confirmText: mode === "allocate" ? "Allocate" : "Recall",
+    async onConfirm() {
+      const p = Number(readForm(amt.parentElement).points);
+      if (!(p > 0)) throw new Error("Enter an amount greater than 0");
+      if (mode === "allocate") await liveAgent.allocate(player.id, p);
+      else await liveAgent.recall(player.id, p);
+      toast(`${mode === "allocate" ? "Allocated" : "Recalled"} ${nice(p)} points`, "ok");
+      done && done();
     },
   });
 }
@@ -5691,6 +5832,9 @@ function openCreateChild(parentUserId, childKind, done) {
 function viewAgentLedger(view) {
   const { rows, summary } = api.agent.familyLedger(session.userId, 80);
   head(view, "Family ledger", "Points movement and betting across your whole downline.");
+  if (liveAgent.active) {
+    view.appendChild(el(`<p class="muted" style="margin:2px 2px 14px">Signed in live — but a real family ledger isn't built yet, so this still shows demo data. Your Downline page (players, allocate, recall) is real.</p>`));
+  }
   view.appendChild(el(`<div class="grid-metrics">
     <div class="metric"><div class="k">Family size</div><div class="v">${summary.familySize}</div></div>
     <div class="metric"><div class="k">Turnover</div><div class="v">${nice(summary.turnover)}</div></div>
