@@ -2141,6 +2141,31 @@ const live = {
       sessionStorage.setItem("ngLiveUser", JSON.stringify(this.user));
     } catch { /* ok to lose the session on refresh if storage is unavailable */ }
   },
+  // Self-service signup — player accounts only (agent/admin are created by
+  // an agent/operator, never self-registered). Auto-signs-in on success,
+  // same as login.
+  async register(name, email, password) {
+    const res = await fetch("/api/auth/register", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, email, password }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Couldn't create account");
+    this.token = data.token; this.user = data.user;
+    try {
+      sessionStorage.setItem("ngLiveToken", this.token);
+      sessionStorage.setItem("ngLiveUser", JSON.stringify(this.user));
+    } catch {}
+  },
+  async changePassword(currentPassword, newPassword) {
+    const res = await fetch("/api/auth/change-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.token}` },
+      body: JSON.stringify({ currentPassword, newPassword }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Couldn't change password");
+  },
   logout() {
     this.token = null; this.user = null;
     try { sessionStorage.removeItem("ngLiveToken"); sessionStorage.removeItem("ngLiveUser"); } catch {}
@@ -5429,6 +5454,25 @@ function openWalletRequestModal(type) {
   });
 }
 
+function openChangePasswordModal() {
+  const box = el(`<div class="stack"></div>`);
+  box.appendChild(field("Current password", "currentPassword", { type: "password" }));
+  box.appendChild(field("New password", "newPassword", { type: "password", placeholder: "at least 6 characters" }));
+  box.appendChild(field("Confirm new password", "confirmPassword", { type: "password" }));
+  modal({
+    title: "Change password",
+    bodyNodes: box,
+    confirmText: "Change password",
+    async onConfirm() {
+      const f = readForm(box);
+      if (!f.currentPassword) throw new Error("Enter your current password");
+      if (f.newPassword !== f.confirmPassword) throw new Error("New passwords don't match");
+      await live.changePassword(f.currentPassword, f.newPassword);
+      toast("Password changed.", "ok");
+    },
+  });
+}
+
 function viewAccount(view) {
   const me = api.player.me(session.userId);
   head(view, "My account", `${me.email || "no email"} · agent: ${me.agentName || "—"}`);
@@ -5442,7 +5486,9 @@ function viewAccount(view) {
     depBtn.onclick = () => openWalletRequestModal("deposit");
     const wdBtn = el(`<button class="btn ghost sm">Request withdrawal</button>`);
     wdBtn.onclick = () => openWalletRequestModal("withdrawal");
-    actions.append(depBtn, wdBtn);
+    const pwBtn = el(`<button class="btn ghost sm">Change password</button>`);
+    pwBtn.onclick = openChangePasswordModal;
+    actions.append(depBtn, wdBtn, pwBtn);
     view.appendChild(actions);
 
     const reqHolder = el(`<div></div>`);
@@ -5562,6 +5608,13 @@ function openLiveLogin(kind = "player") {
   const box = el(`<div class="stack"></div>`);
   [field("Email", "email", { type: "email", placeholder: "you@example.com" }),
    field("Password", "password", { type: "password" })].forEach((n) => box.appendChild(n));
+  // Self-service signup is player-only — agent/admin accounts are created
+  // by an agent/operator, never self-registered.
+  if (kind === "player") {
+    const switchLink = el(`<button type="button" class="klink" style="text-align:left">New here? Create an account</button>`);
+    switchLink.onclick = () => { document.querySelector(".modal [data-x]")?.click(); openLiveSignup(); };
+    box.appendChild(switchLink);
+  }
   modal({
     title: kind === "admin" ? "Sign in — manage live requests"
       : kind === "agent" ? "Sign in — real agent account"
@@ -5581,6 +5634,29 @@ function openLiveLogin(kind = "player") {
         await live.login(f.email, f.password);
         toast(`Signed in as ${live.user.name} — real balance ${nice(live.user.points)} points`, "ok");
       }
+      render();
+    },
+  });
+}
+
+function openLiveSignup() {
+  const box = el(`<div class="stack"></div>`);
+  [field("Name", "name"),
+   field("Email", "email", { type: "email", placeholder: "you@example.com" }),
+   field("Password", "password", { type: "password", placeholder: "at least 6 characters" })].forEach((n) => box.appendChild(n));
+  const switchLink = el(`<button type="button" class="klink" style="text-align:left">Already have an account? Sign in</button>`);
+  switchLink.onclick = () => { document.querySelector(".modal [data-x]")?.click(); openLiveLogin("player"); };
+  box.appendChild(switchLink);
+  modal({
+    title: "Create your account",
+    bodyNodes: box,
+    confirmText: "Create account",
+    async onConfirm() {
+      const f = readForm(box);
+      if (!f.name) throw new Error("Enter your name");
+      if (!f.email || !f.password) throw new Error("Enter an email and password");
+      await live.register(f.name, f.email, f.password);
+      toast(`Welcome, ${live.user.name}! Account created.`, "ok");
       render();
     },
   });
