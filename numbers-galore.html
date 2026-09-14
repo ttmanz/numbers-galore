@@ -399,13 +399,13 @@ table.tbl tr:hover td { background: var(--surface-2); }
   --bs: 3cqw; width: var(--bs); height: var(--bs); aspect-ratio: 1;
   margin: calc(var(--bs) / -2) 0 0 calc(var(--bs) / -2);
   will-change: transform;
-  /* Softened on purpose: sharp, readable numbers churning behind the reveal
-     ball read as a second, competing draw. Blurred, they're just motion in
-     the glass — round, uniform, and no longer distinct digits. In cqw, not
-     a flat px, so the blur-to-ball-size ratio (and so how unreadable the
-     digit is) stays the same at any width, not just the one it was tuned at. */
-  filter: blur(1.6cqw);
 }
+/* Softened on purpose: sharp, readable numbers churning behind the reveal
+   ball read as a second, competing draw. Blurred, they're just motion in
+   the glass — no longer distinct digits. Scoped to the number itself, not
+   the whole ball div (that was blurring the ball's own shape/shading away
+   to near-invisibility at this size) — the same fix Just 6's drum uses. */
+.keno-drum .kball > span { filter: blur(.5cqw); opacity: .7; }
 @media (prefers-reduced-motion: reduce) { .keno-drum .kball { transform: translate(var(--fx), var(--fy)); } }
 
 /* ---- the drawn ball, enlarged in front of the sphere before it joins Draw: */
@@ -4290,7 +4290,7 @@ function kenoDrum() {
   const drum = el(`<div class="keno-drum" aria-hidden="true" style="left:${KENO_DRUM.x}%;top:${KENO_DRUM.y}%;width:${KENO_DRUM.w}%;height:${KENO_DRUM.h}%"></div>`);
   const layer = el(`<div class="keno-drum-balls"></div>`);
   kenoDrumBalls().forEach((b) => {
-    const ball = el(`<div class="kball">${b.n}</div>`);
+    const ball = el(`<div class="kball"><span>${b.n}</span></div>`);
     ball.dataset.px = b.x; ball.dataset.py = b.y; ball.dataset.pz = b.z;
     const k = 100 / J6_PHYS.SIZE;
     ball.style.cssText = `--bs:${b.size}cqw;--fx:${((J6_PHYS.CENTRE + b.x) * k).toFixed(1)}%;--fy:${((J6_PHYS.CENTRE - b.y) * k).toFixed(1)}%;`;
