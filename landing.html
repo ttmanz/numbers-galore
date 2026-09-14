@@ -19,6 +19,7 @@
     --cyan:#5ce1ff;
     --violet:#a875ff;
     --gold:#e3b969;
+    --action:#2d28fa;
     --ember:#ff8a5b;
     --keno:#d9b876;
     --just6:#a06bff;
@@ -84,11 +85,11 @@
   }
   .btn:active{transform:translateY(1px)}
   .btn-primary{
-    background:linear-gradient(180deg,#f2cf8e,var(--gold));
-    color:#241705;
-    box-shadow:0 0 0 1px rgba(227,185,105,.35), 0 8px 24px -8px rgba(227,185,105,.55);
+    background:var(--action);
+    color:#fff;
+    box-shadow:0 0 0 1px color-mix(in srgb, var(--action) 55%, transparent), 0 8px 24px -8px color-mix(in srgb, var(--action) 65%, transparent);
   }
-  .btn-primary:hover{box-shadow:0 0 0 1px rgba(227,185,105,.55), 0 10px 30px -6px rgba(227,185,105,.7)}
+  .btn-primary:hover{filter:brightness(1.1);box-shadow:0 0 0 1px color-mix(in srgb, var(--action) 70%, transparent), 0 10px 30px -6px color-mix(in srgb, var(--action) 80%, transparent)}
   .btn-ghost{
     background:rgba(255,255,255,.03);
     border-color:rgba(154,162,207,.35);
