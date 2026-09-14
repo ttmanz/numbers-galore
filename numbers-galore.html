@@ -272,6 +272,20 @@ table.tbl tr:hover td { background: var(--surface-2); }
 .modal .body { padding: 18px; display: flex; flex-direction: column; gap: 13px; }
 .modal .foot { padding: 14px 18px; border-top: 1px solid var(--line); display: flex; gap: 8px; justify-content: flex-end; }
 
+/* ---- entry gate: shown instead of the demo shell to anyone not signed in
+   for real and without the team passcode ------------------------------------ */
+.gate { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }
+.gate-card {
+  width: 100%; max-width: 360px; background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow); padding: 26px 24px 24px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.gate-card .brand { padding: 0 0 6px; }
+.gate-card h1 { font-size: 19px; margin: 4px 0 0; }
+.gate-card > p.muted { margin: 0 0 4px; font-size: 13px; }
+.gate-div { display: flex; align-items: center; gap: 10px; color: var(--ink-dim); font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; margin: 6px 0; }
+.gate-div::before, .gate-div::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
 /* ============================================================================
    KENO game view
    ========================================================================== */
@@ -2429,6 +2443,16 @@ async function playRound(gameId, selection, stake, side) {
    ------------------------------------------------------------------------- */
 const KIND_CHILD = { super: "master", master: "agent", agent: "player" };
 const KIND_LABEL = { super: "Super agent", master: "Master agent", agent: "Agent", player: "Player", admin: "Operator" };
+// The real `games` table only stores id/name/enabled/config — kind and blurb
+// are cosmetic and never change per-game, so they're not worth a schema
+// migration. Kept here so the live Admin Games page can render the exact
+// same card header as the demo one instead of leaving it blank.
+const GAME_META = {
+  keno: { kind: "instant", blurb: "Pick up to 8 of 80. Twenty balls drop. The more you match, the bigger the multiplier." },
+  just6: { kind: "instant", blurb: "Find 6 of 48 in a 35-ball draw. The faster your six land, the bigger the multiplier. Pick 7–8 for a system bet, plus speciality bets on the first five balls." },
+  hotdice: { kind: "instant", blurb: "Three dice hit the table. Bet the total (3–18), plus Small/Big, Odd/Even and the Hard Ways. Lay as many bets as you like each round." },
+  big3: { kind: "instant", blurb: "Three animal-head reels spin 0–9. Call a number's position, its exact order with the next one or all three, or just that it shows up somewhere." },
+};
 
 const agents = {
   record(userId) { return store.get().agents.find((a) => a.userId === userId); },
@@ -3068,6 +3092,60 @@ const readForm = (container) => {
   return o;
 };
 
+// The local demo (fake Ava/Lena/Operator identities, playable with fake
+// points) used to be the very first thing anyone hit at numbers-galore.com —
+// no login of any kind, including a fully clickable "Admin Operator" console.
+// Now the whole demo shell sits behind one shared team passcode, checked
+// against sessionStorage so it resets on a fresh browser session rather than
+// staying open forever on a shared machine. A real customer or real staff
+// member never needs this passcode at all — the gate screen's own sign-in
+// button reaches the real backend directly and never touches it.
+const DEMO_PASSCODE = "Ng@games/";
+function demoUnlocked() {
+  try { return sessionStorage.getItem("ngDemoUnlocked") === "1"; } catch { return false; }
+}
+function unlockDemo(pass) {
+  if (pass !== DEMO_PASSCODE) return false;
+  try { sessionStorage.setItem("ngDemoUnlocked", "1"); } catch { /* private browsing, etc. — unlock just won't persist across reloads */ }
+  return true;
+}
+
+function renderGate(root, routeRole) {
+  root.innerHTML = "";
+  const copy = {
+    player: { title: "Play for real", sub: "Sign in with your real account, or create one, to play with real points." },
+    agent: { title: "Agent sign-in", sub: "Sign in with your real agent account to manage your downline." },
+    admin: { title: "Admin sign-in", sub: "Sign in with your real admin account to manage the platform." },
+  }[routeRole];
+  const wrap = el(`<div class="gate"><div class="gate-card">
+    <div class="brand"><div class="dot">NG</div><div><b>Numbers Galore</b><span>Gaming platform</span></div></div>
+    <h1>${esc(copy.title)}</h1>
+    <p class="muted">${esc(copy.sub)}</p>
+  </div></div>`);
+  const card = wrap.querySelector(".gate-card");
+  const signInBtn = el(`<button class="btn primary" style="width:100%">Sign in</button>`);
+  signInBtn.onclick = () => openLiveLogin(routeRole);
+  card.appendChild(signInBtn);
+  if (routeRole === "player") {
+    const signupLink = el(`<button type="button" class="klink" style="text-align:center">New here? Create an account</button>`);
+    signupLink.onclick = () => openLiveSignup();
+    card.appendChild(signupLink);
+  }
+  card.appendChild(el(`<div class="gate-div"><span>or, for the team</span></div>`));
+  const passField = field("Demo passcode", "pass", { type: "password" });
+  card.appendChild(passField);
+  const unlockBtn = el(`<button class="btn ghost" style="width:100%">Enter demo</button>`);
+  const submit = () => {
+    const val = passField.querySelector("input").value;
+    if (unlockDemo(val)) render();
+    else toast("Wrong passcode", "bad");
+  };
+  unlockBtn.onclick = submit;
+  passField.querySelector("input").addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+  card.appendChild(unlockBtn);
+  root.appendChild(wrap);
+}
+
 /* ---- session / router --------------------------------------------------- */
 const session = { userId: null, role: null };
 
@@ -3125,6 +3203,10 @@ function render() {
   // staff reach their console once the switcher is hidden for a real
   // signed-in player, below.
   const routeRole = route.startsWith("admin") ? "admin" : route.startsWith("agent") ? "agent" : "player";
+  // A real live session for this exact role skips the gate outright — only
+  // the fake local demo needs the passcode, never a genuine signed-in user.
+  const liveForRoute = (routeRole === "player" && live.active) || (routeRole === "agent" && liveAgent.active) || (routeRole === "admin" && liveAdmin.active);
+  if (!liveForRoute && !demoUnlocked()) { renderGate(root, routeRole); return; }
   if (routeRole !== session.role) { session.role = routeRole; session.userId = ids[routeRole].id; }
   const me = store.get().users.find((u) => u.id === session.userId);
   const bal = me.role === "admin" ? null
@@ -3154,11 +3236,13 @@ function render() {
   // main
   const main = el(`<div class="main"></div>`);
   const topbar = el(`<div class="topbar"></div>`);
-  // A real signed-in player is a genuine customer, not a tester — they never
-  // see the demo Player/Agent/Admin switcher. Staff still reach Agent/Admin
-  // directly by URL (numbers-galore.com/play.html#/agent or #/admin), which
-  // the role-sync above makes work correctly without ever clicking a pill.
-  if (!live.active) {
+  // A real signed-in user — player, agent, or admin — is a genuine customer
+  // or staff member, not a tester, so none of them ever see the demo
+  // Player/Agent/Admin switcher (bug: this used to check live.active alone,
+  // so a real live Agent or Admin still saw the fake Ava/Lena/Operator pills
+  // bleeding through). Anyone else reaching this point already passed the
+  // demoUnlocked() gate above, so it's fine to show the switcher.
+  if (!live.active && !liveAgent.active && !liveAdmin.active) {
     const switcher = el(`<div class="switcher"></div>`);
     [["player", ids.player], ["agent", ids.agent], ["admin", ids.admin]].forEach(([r, u]) => {
       const c = el(`<button class="chip ${session.role === r ? "on" : ""}"><span class="r">${r}</span>${esc(u.name.split(" ")[0])}</button>`);
@@ -6041,16 +6125,23 @@ function adminDefaultsBlock(card, g, opts) {
   box.appendChild(field("Max bet", "maxStake", { type: "number", value: g.config.maxStake }));
   card.appendChild(box);
   const save = el(`<button class="btn sm primary" style="align-self:flex-start">Save defaults</button>`);
-  save.onclick = () => {
+  // opts.onSave, when given (the live/real Games page), gets the same patch
+  // shape and does its own async POST + reload — the demo path below (no
+  // onSave) is untouched from before this became shared.
+  save.onclick = async () => {
     const f = readForm(box);
     const minStake = Math.max(1, parseFloat(f.minStake) || 1);
     const maxStake = Math.max(minStake, parseFloat(f.maxStake) || minStake);
     const patch = { minStake, maxStake };
     patch[opts.betKey] = Math.min(Math.max(parseFloat(f[opts.betKey]) || minStake, minStake), maxStake);
     if (opts.lucky) patch[opts.lucky.key] = Math.min(Math.max(parseInt(f[opts.lucky.key], 10) || 1, 1), opts.lucky.max);
-    api.admin.updateGameConfig(g.id, patch);
-    toast(`${g.name} defaults saved`, "ok");
-    render();
+    if (opts.onSave) {
+      try { await opts.onSave(patch); } catch (e) { toast(e.message, "bad"); }
+    } else {
+      api.admin.updateGameConfig(g.id, patch);
+      toast(`${g.name} defaults saved`, "ok");
+      render();
+    }
   };
   card.appendChild(save);
   card.appendChild(el(`<p class="muted" style="font-size:11.5px">${opts.note}</p>`));
@@ -6199,7 +6290,11 @@ function viewAdminGames(view) {
 // editing rates for real still has to be done directly against the DB for
 // now. Separate render path; nothing here touches `store`.
 function viewAdminGamesLive(view) {
-  head(view, "Games", "Enable or disable a game. Paytable editing for real games isn't built yet — turn one off if it needs a change made directly.");
+  // Same card format as the demo Games page (defaults block + full paytable
+  // editors, not just a raw config dump) — the real games table only ever
+  // needed a shallow-merge PATCH under the hood, same as the demo's local
+  // store.tx(), so there was no reason for the real version to be thinner.
+  head(view, "Games", "Enable a game, or tune its paytable. Changes save straight to the real games table.");
   const content = el(`<div></div>`);
   content.appendChild(el(`<p class="muted" style="padding:24px 2px">Loading…</p>`));
   view.appendChild(content);
@@ -6212,8 +6307,9 @@ function viewAdminGamesLive(view) {
       content.innerHTML = "";
       const stack = el(`<div class="stack"></div>`);
       games.forEach((g) => {
+        const meta = GAME_META[g.id] || { kind: "instant", blurb: "" };
         const card = el(`<div class="card pad stack"></div>`);
-        const hd = el(`<div class="row-between"><h3 style="font-size:16px">${esc(g.name)}</h3></div>`);
+        const hd = el(`<div class="row-between"><div><h3 style="font-size:16px">${esc(g.name)} <span class="pill dim">${esc(meta.kind)}</span></h3><p class="muted" style="margin:3px 0 0">${esc(meta.blurb)}</p></div></div>`);
         const toggle = el(`<button class="btn sm ${g.enabled ? "" : "primary"}">${g.enabled ? "Disable" : "Enable"}</button>`);
         toggle.onclick = async () => {
           try { await liveAdmin.updateGame(g.id, { enabled: !g.enabled }); toast(`${g.name} ${g.enabled ? "disabled" : "enabled"}`, "ok"); reload(); }
@@ -6221,8 +6317,125 @@ function viewAdminGamesLive(view) {
         };
         hd.appendChild(toggle);
         card.appendChild(hd);
-        const cfgStr = Object.entries(g.config).map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`).join("  ·  ");
-        card.appendChild(el(`<p class="mono muted" style="font-size:11.5px">${esc(cfgStr)}</p>`));
+
+        if (g.id === "keno") {
+          adminDefaultsBlock(card, g, {
+            betKey: "defaultStake", betLabel: "Default bet",
+            lucky: { key: "defaultLuckyN", label: "Default lucky pick", max: g.config.maxPick, fallback: 4 },
+            note: `Default bet and default lucky pick are what a player's Keno screen opens with. Min/max bet bound every stake step and every "Random" pick — the default is clamped between them.`,
+            onSave: async (patch) => { await liveAdmin.updateGame(g.id, { config: patch }); toast(`${g.name} defaults saved`, "ok"); reload(); },
+          });
+
+          const table = kenoPaytableTable(g.config, true);
+          card.appendChild(table);
+          const save = el(`<button class="btn sm primary" style="align-self:flex-start">Save paytable</button>`);
+          save.onclick = async () => {
+            const next = {};
+            table.querySelectorAll("input[data-p]").forEach((i) => {
+              const p = +i.dataset.p, h = +i.dataset.h, v = parseFloat(i.value) || 0;
+              next[p] = next[p] || {};
+              if (v > 0) next[p][h] = v;
+            });
+            try { await liveAdmin.updateGame(g.id, { config: { paytable: next } }); toast("Paytable saved — RTP recalculated", "ok"); reload(); }
+            catch (e) { toast(e.message, "bad"); }
+          };
+          card.appendChild(save);
+          card.appendChild(el(`<p class="muted" style="font-size:11.5px">RTP column is theoretical hold per pick level (hypergeometric on ${g.config.pool} numbers, ${g.config.draw} drawn).</p>`));
+        } else if (g.id === "just6") {
+          adminDefaultsBlock(card, g, {
+            betKey: "defaultStake", betLabel: "Default bet",
+            note: `Default bet is the stake per line a player's Just 6 screen opens with. Min/max bet bound every stake step and every speciality bet — the default is clamped between them.`,
+            onSave: async (patch) => { await liveAdmin.updateGame(g.id, { config: patch }); toast(`${g.name} defaults saved`, "ok"); reload(); },
+          });
+
+          const table = just6PaytableTable(g.config, true);
+          card.appendChild(table);
+          const save = el(`<button class="btn sm primary" style="align-self:flex-start">Save paytable</button>`);
+          save.onclick = async () => {
+            const next = {};
+            table.querySelectorAll("input[data-pos]").forEach((i) => { const v = parseFloat(i.value) || 0; if (v > 0) next[+i.dataset.pos] = v; });
+            try { await liveAdmin.updateGame(g.id, { config: { paytable: next } }); toast("Just 6 paytable saved", "ok"); reload(); }
+            catch (e) { toast(e.message, "bad"); }
+          };
+          card.appendChild(save);
+          const rtpRow = el(`<div class="row-between"><p class="muted" style="font-size:11.5px;margin:0">Main-game RTP has no closed form — run a Monte-Carlo estimate.</p></div>`);
+          const rtpBtn = el(`<button class="btn sm">Estimate RTP</button>`);
+          const rtpOut = el(`<span class="mono muted" style="font-size:12px"></span>`);
+          rtpBtn.onclick = () => {
+            rtpBtn.disabled = true; rtpBtn.textContent = "Running 20k…";
+            setTimeout(() => {
+              const r = just6RTP(g.config, 20000);
+              rtpOut.textContent = `  straight ${(r[6] * 100).toFixed(1)}% · sys-7 ${(r[7] * 100).toFixed(1)}% · sys-8 ${(r[8] * 100).toFixed(1)}%`;
+              rtpBtn.disabled = false; rtpBtn.textContent = "Re-run";
+            }, 30);
+          };
+          rtpRow.append(rtpBtn, rtpOut);
+          card.appendChild(rtpRow);
+          card.appendChild(el(`<p class="muted" style="font-size:11.5px">Speciality bets: ${Object.entries(JUST6_SPECIALITIES).map(([k, s]) => `${s.label.replace(/ — .*/, "")} ${s.pay}×`).join(" · ")}. Colour is 1-in-8 paying 4.5× (≈56% RTP) — per spec.</p>`));
+        } else if (g.id === "hotdice") {
+          adminDefaultsBlock(card, g, {
+            betKey: "defaultChip", betLabel: "Default chip",
+            note: `Default chip is the chip value a player's Hot Dice table opens with. Min/max bet bound every chip stack and every bet on the table — the default is clamped between them.`,
+            onSave: async (patch) => { await liveAdmin.updateGame(g.id, { config: patch }); toast(`${g.name} defaults saved`, "ok"); reload(); },
+          });
+
+          const table = el(`<div style="overflow-x:auto"><table class="paytable-mini"><thead><tr><th>Total</th>${range(3, 18).map((s) => `<th>${s}</th>`).join("")}</tr></thead><tbody><tr><td style="text-align:left">Pays</td></tr></tbody></table></div>`);
+          const tr = table.querySelector("tbody tr");
+          for (let s = 3; s <= 18; s++) {
+            const td = el(`<td></td>`);
+            td.appendChild(el(`<input class="editable-cell mono" value="${g.config.odds[s]}" data-total="${s}">`));
+            tr.appendChild(td);
+          }
+          card.appendChild(table);
+          const save = el(`<button class="btn sm primary" style="align-self:flex-start">Save odds</button>`);
+          save.onclick = async () => {
+            const next = {};
+            table.querySelectorAll("input[data-total]").forEach((i) => { next[+i.dataset.total] = parseFloat(i.value) || 0; });
+            try { await liveAdmin.updateGame(g.id, { config: { odds: next } }); toast("Hot Dice odds saved", "ok"); reload(); }
+            catch (e) { toast(e.message, "bad"); }
+          };
+          card.appendChild(save);
+          const worst = hotDiceRTP(g.config).reduce((m, r) => Math.min(m, r.rtp), 1);
+          const best = hotDiceRTP(g.config).reduce((m, r) => Math.max(m, r.rtp), 0);
+          card.appendChild(el(`<p class="muted" style="font-size:11.5px">Even-money (Small/Big, Odd/Even) ${g.config.evenMoney}× · Hard Way ${g.config.hardWay}×. Theoretical RTP across all bets ${(worst * 100).toFixed(1)}%–${(best * 100).toFixed(1)}% (3d6, 216 outcomes). Triples ${g.config.triplesLoseEvenMoney ? "void" : "do not void"} even-money bets.</p>`));
+        } else if (g.id === "big3") {
+          adminDefaultsBlock(card, g, {
+            betKey: "defaultChip", betLabel: "Default chip",
+            note: `Default chip is the chip value a player's Big 3 slip opens with. Min/max bet bound every chip stack and every bet in the slip — the default is clamped between them.`,
+            onSave: async (patch) => { await liveAdmin.updateGame(g.id, { config: patch }); toast(`${g.name} defaults saved`, "ok"); reload(); },
+          });
+
+          const rows = big3RTP(g.config);
+          const payKeyByBet = { "First / Second / Third (any one digit)": "single", "Show (digit in any of the 3 reels)": "show",
+            "Forecast (2 digits, exact order)": "forecast", "Rev. Forecast (2 digits, either order)": "revForecast",
+            "Tri-cast (3 digits, exact order)": "tricast", "Rev. Tri-cast (3 distinct digits, any order)": "revTricast" };
+          const table = el(`<div style="overflow-x:auto"><table class="paytable-mini"><thead><tr><th style="text-align:left">Bet</th><th>Chance</th><th>Pays</th><th>RTP</th></tr></thead><tbody></tbody></table></div>`);
+          const tb = table.querySelector("tbody");
+          rows.forEach((r) => {
+            const payKey = payKeyByBet[r.bet];
+            const tr = el(`<tr><td style="text-align:left">${esc(r.bet)}</td><td class="mono">1 in ${Math.round(1 / r.prob)}</td></tr>`);
+            const td = el(`<td></td>`);
+            td.appendChild(el(`<input class="editable-cell mono" value="${g.config.pay[payKey]}" data-pay="${payKey}">`));
+            tr.appendChild(td);
+            tr.appendChild(el(`<td class="mono" style="color:var(--violet)">${(r.rtp * 100).toFixed(1)}%</td>`));
+            tb.appendChild(tr);
+          });
+          card.appendChild(table);
+          const save = el(`<button class="btn sm primary" style="align-self:flex-start">Save pay rates</button>`);
+          save.onclick = async () => {
+            const next = { ...g.config.pay };
+            table.querySelectorAll("input[data-pay]").forEach((i) => { next[i.dataset.pay] = parseFloat(i.value) || 0; });
+            try { await liveAdmin.updateGame(g.id, { config: { pay: next } }); toast("Big 3 pay rates saved", "ok"); reload(); }
+            catch (e) { toast(e.message, "bad"); }
+          };
+          card.appendChild(save);
+          const worst = rows.reduce((m, r) => Math.min(m, r.rtp), 1);
+          const best = rows.reduce((m, r) => Math.max(m, r.rtp), 0);
+          card.appendChild(el(`<p class="muted" style="font-size:11.5px">Three independent 0–9 reels (1000 equally-likely outcomes). Theoretical RTP ranges ${(worst * 100).toFixed(1)}%–${(best * 100).toFixed(1)}% across bet types.</p>`));
+        } else {
+          const cfgStr = Object.entries(g.config).map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`).join("  ·  ");
+          card.appendChild(el(`<p class="mono muted" style="font-size:11.5px">${esc(cfgStr)}</p>`));
+        }
         stack.appendChild(card);
       });
       content.appendChild(stack);
