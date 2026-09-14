@@ -4000,11 +4000,11 @@ const J6_PHYS = {
   STEP: 1 / 60, MAX_STEPS: 3,
 };
 
-// Just 6's own drum runs livelier than Keno's — smaller balls with more room
-// to move, more turbulence, harder/more frequent kicks, and near-perfectly
-// elastic collisions so the energy doesn't bleed off between kicks. Vessel
-// geometry (SIZE/CENTRE/R_INNER/PERSP/etc.) stays identical to J6_PHYS, which
-// Keno's own tumbler keeps using unchanged.
+// Both drums run livelier than the original J6_PHYS baseline — smaller balls
+// with more room to move, more turbulence, harder/more frequent kicks, and
+// near-perfectly elastic collisions so the energy doesn't bleed off between
+// kicks. Vessel geometry (SIZE/CENTRE/R_INNER/PERSP/etc.) stays identical and
+// shared via the ...J6_PHYS spread — only the "energy" numbers are tuned.
 const JUST6_PHYS = {
   ...J6_PHYS,
   BALL_R: 19,
@@ -4012,6 +4012,10 @@ const JUST6_PHYS = {
   KICK: 55, KICK_MS: 320,
   RESTITUTION: 0.99, WALL_K: 380,
 };
+// Keno gets the same energetic tuning as Just 6 — kept as its own named
+// object (rather than just reusing JUST6_PHYS directly) so either game's
+// numbers can drift independently later without the other silently moving.
+const KENO_PHYS = { ...JUST6_PHYS };
 
 let J6_DRUM = null;     // the running drum, if there is one
 
@@ -4155,7 +4159,7 @@ function just6Drum() {
 }
 
 /* ---- Keno's own tumbler: the exact same physics model as Just 6's drum
-   (J6_PHYS, the step/wall/kick logic below is a straight port of
+   (KENO_PHYS, the step/wall/kick logic below is a straight port of
    just6DrumStart), just driven off a plain white/black `.kball` instead of
    the coloured `.j6-ball`, and clipped to a circle instead of a polygon. Kept
    as its own start/stop/balls trio (not shared state) so switching games
@@ -4170,7 +4174,7 @@ function kenoDrumStop() {
 
 function kenoDrumStart(layer) {
   kenoDrumStop();
-  const P = J6_PHYS;
+  const P = KENO_PHYS;
   const rnd = () => Math.random() - 0.5;
   // Seeded at speed, and past the settle phase, so the drum is churning from
   // the first frame. Left to accelerate from rest the way the bingo machine
@@ -4282,7 +4286,7 @@ function kenoDrumBalls() {
   KENO_DRUM_BALLS = range(1, 24).map(() => {
     let x, y, z;
     do { x = rnd(-R, R); y = rnd(-R, R); z = rnd(-R, R); } while (x * x + y * y + z * z > R * R);
-    return { n: Math.ceil(Math.random() * 80), x, y, z, size: 3 };
+    return { n: Math.ceil(Math.random() * 80), x, y, z, size: rnd(2.0, 2.4) };
   });
   return KENO_DRUM_BALLS;
 }
