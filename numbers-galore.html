@@ -2290,6 +2290,38 @@ const liveAdmin = {
     if (!res.ok) throw new Error(data.error || "Couldn't reject");
     return data;
   },
+  // Shared plumbing for the rest of the real Admin console (dashboard,
+  // players, agents, rounds, ledger, games) — all thin wrappers over one
+  // GET/POST helper rather than hand-rolling fetch() six more times.
+  async _get(path) {
+    const res = await fetch(path, { headers: { Authorization: `Bearer ${this.token}` } });
+    const data = await res.json();
+    if (!res.ok) { if (res.status === 401) this.logout(); throw new Error(data.error || "Request failed"); }
+    return data;
+  },
+  async _post(path, body) {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.token}` },
+      body: JSON.stringify(body || {}),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Request failed");
+    return data;
+  },
+  dashboard() { return this._get("/api/admin/dashboard"); },
+  players(q) { return this._get(`/api/admin/players${q ? `?q=${encodeURIComponent(q)}` : ""}`); },
+  topup(id, amount, note) { return this._post(`/api/admin/players/${id}/topup`, { amount, note }); },
+  adjust(id, amount, note) { return this._post(`/api/admin/players/${id}/adjust`, { amount, note }); },
+  setPlayerStatus(id, status) { return this._post(`/api/admin/players/${id}/status`, { status }); },
+  agentsList() { return this._get("/api/admin/agents"); },
+  mintSuper(name, email, password, commissionRate, startingFloat) {
+    return this._post("/api/admin/agents", { name, email, password, commissionRate, startingFloat });
+  },
+  rounds(gameId, limit = 150) { return this._get(`/api/admin/rounds?limit=${limit}${gameId ? `&gameId=${gameId}` : ""}`); },
+  ledgerAll(type, limit = 200) { return this._get(`/api/admin/ledger?limit=${limit}${type ? `&type=${type}` : ""}`); },
+  games() { return this._get("/api/admin/games"); },
+  updateGame(id, patch) { return this._post(`/api/admin/games/${id}`, patch); },
 };
 
 /* A third, equally independent live session for an agent account — same
@@ -5906,6 +5938,7 @@ function viewAgentLedgerLive(view) {
    ADMIN
    ========================================================================= */
 function viewAdminDash(view) {
+  if (liveAdmin.active) { viewAdminDashLive(view); return; }
   const d = api.admin.dashboard();
   head(view, "Dashboard", "Platform-wide, all games.");
   view.appendChild(el(`<div class="grid-metrics">
@@ -5927,6 +5960,41 @@ function viewAdminDash(view) {
     <td class="mono" style="text-align:right">${g.turnover ? (g.rtp * 100).toFixed(1) + "%" : "—"}</td>
   </tr>`)));
   view.appendChild(wrap);
+}
+
+// Real dashboard — same markup as the demo one above, sourced from actual
+// Postgres aggregates instead of the local `store`. Separate render path;
+// nothing here touches `store`.
+function viewAdminDashLive(view) {
+  head(view, "Dashboard", "Platform-wide, all games — real data.");
+  const content = el(`<div></div>`);
+  content.appendChild(el(`<p class="muted" style="padding:24px 2px">Loading…</p>`));
+  view.appendChild(content);
+
+  liveAdmin.dashboard().then((d) => {
+    content.innerHTML = "";
+    content.appendChild(el(`<div class="grid-metrics">
+      <div class="metric"><div class="k">Turnover</div><div class="v">${nice(d.turnover)}</div><div class="sub">${d.rounds} rounds</div></div>
+      <div class="metric"><div class="k">Payout</div><div class="v">${nice(d.payout)}</div></div>
+      <div class="metric"><div class="k">Gross margin (GGR)</div><div class="v ${d.ggr >= 0 ? "jade" : "rose"}">${nice(d.ggr)}</div><div class="sub">${d.turnover ? ((d.ggr / d.turnover) * 100).toFixed(1) : 0}% hold</div></div>
+      <div class="metric"><div class="k">Players</div><div class="v">${d.activePlayers}<span style="font-size:14px;color:var(--ink-dim)"> / ${d.players}</span></div><div class="sub">active / total</div></div>
+      <div class="metric"><div class="k">Float outstanding</div><div class="v">${nice(d.floatOut)}</div><div class="sub">points held below operator</div></div>
+    </div>`));
+    const wrap = el(`<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Game</th><th>Status</th><th style="text-align:right">Rounds</th><th style="text-align:right">Turnover</th><th style="text-align:right">GGR</th><th style="text-align:right">Actual RTP</th></tr></thead><tbody></tbody></table></div>`);
+    const tb = wrap.querySelector("tbody");
+    d.perGame.forEach((g) => tb.appendChild(el(`<tr>
+      <td><b>${esc(g.name)}</b></td>
+      <td>${g.enabled ? '<span class="pill ok">live</span>' : '<span class="pill dim">off</span>'}</td>
+      <td class="mono" style="text-align:right">${g.rounds}</td>
+      <td class="mono" style="text-align:right">${nice(g.turnover)}</td>
+      <td class="mono" style="text-align:right;color:${g.ggr >= 0 ? "var(--jade)" : "var(--rose)"}">${nice(g.ggr)}</td>
+      <td class="mono" style="text-align:right">${g.turnover ? (g.rtp * 100).toFixed(1) + "%" : "—"}</td>
+    </tr>`)));
+    content.appendChild(wrap);
+  }).catch((e) => {
+    content.innerHTML = "";
+    content.appendChild(el(`<p class="muted" style="padding:24px 2px">Couldn't load: ${esc(e.message)}</p>`));
+  });
 }
 
 // One "Defaults & limits" editor, shared by every game's admin card: a
@@ -5959,6 +6027,7 @@ function adminDefaultsBlock(card, g, opts) {
 }
 
 function viewAdminGames(view) {
+  if (liveAdmin.active) { viewAdminGamesLive(view); return; }
   head(view, "Games", "Enable a game, or tune its paytable. Adding a new game = one module + one row here.");
   const games = api.admin.games();
   const stack = el(`<div class="stack"></div>`);
@@ -6094,7 +6163,49 @@ function viewAdminGames(view) {
   view.appendChild(stack);
 }
 
+// Real games — enable/disable only. Full paytable editing per game is a
+// much bigger surface (4 different editor shapes above) than this pass
+// covers; a real admin can turn a game on/off and see its live config, but
+// editing rates for real still has to be done directly against the DB for
+// now. Separate render path; nothing here touches `store`.
+function viewAdminGamesLive(view) {
+  head(view, "Games", "Enable or disable a game. Paytable editing for real games isn't built yet — turn one off if it needs a change made directly.");
+  const content = el(`<div></div>`);
+  content.appendChild(el(`<p class="muted" style="padding:24px 2px">Loading…</p>`));
+  view.appendChild(content);
+
+  async function reload() {
+    content.innerHTML = "";
+    content.appendChild(el(`<p class="muted" style="padding:24px 2px">Loading…</p>`));
+    try {
+      const games = await liveAdmin.games();
+      content.innerHTML = "";
+      const stack = el(`<div class="stack"></div>`);
+      games.forEach((g) => {
+        const card = el(`<div class="card pad stack"></div>`);
+        const hd = el(`<div class="row-between"><h3 style="font-size:16px">${esc(g.name)}</h3></div>`);
+        const toggle = el(`<button class="btn sm ${g.enabled ? "" : "primary"}">${g.enabled ? "Disable" : "Enable"}</button>`);
+        toggle.onclick = async () => {
+          try { await liveAdmin.updateGame(g.id, { enabled: !g.enabled }); toast(`${g.name} ${g.enabled ? "disabled" : "enabled"}`, "ok"); reload(); }
+          catch (e) { toast(e.message, "bad"); }
+        };
+        hd.appendChild(toggle);
+        card.appendChild(hd);
+        const cfgStr = Object.entries(g.config).map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`).join("  ·  ");
+        card.appendChild(el(`<p class="mono muted" style="font-size:11.5px">${esc(cfgStr)}</p>`));
+        stack.appendChild(card);
+      });
+      content.appendChild(stack);
+    } catch (e) {
+      content.innerHTML = "";
+      content.appendChild(el(`<p class="muted" style="padding:24px 2px">Couldn't load: ${esc(e.message)}</p>`));
+    }
+  }
+  reload();
+}
+
 function viewAdminAgents(view) {
+  if (liveAdmin.active) { viewAdminAgentsLive(view); return; }
   const roots = api.admin.agentTree();
   head(view, "Agents", "super → master → agent → player. Points flow down; recalls flow up.");
 
@@ -6151,7 +6262,63 @@ function viewAdminAgents(view) {
   view.appendChild(treeCard);
 }
 
+// Real agents — a flat list across every tier (super/master/agent), since
+// admin can only mint a top-level super here; growing anyone below that is
+// each agent's own /api/agent/recruit, done from their own real session
+// (see viewAgentLive). Separate render path; nothing here touches `store`.
+function viewAdminAgentsLive(view) {
+  const mintBtn = el(`<button class="btn primary sm">+ New super agent</button>`);
+  mintBtn.onclick = () => {
+    const box = el(`<div class="stack"></div>`);
+    [field("Name", "name"), field("Email", "email", { type: "email" }), field("Password", "password", { type: "password", placeholder: "at least 6 characters" }),
+     field("Commission %", "commissionRate", { type: "number", value: 8 }), field("Starting float", "startingFloat", { type: "number", placeholder: "0" })].forEach((n) => box.appendChild(n));
+    modal({
+      title: "New super agent", bodyNodes: box, confirmText: "Create",
+      async onConfirm() {
+        const f = readForm(box);
+        if (!f.name) throw new Error("Enter a name");
+        if (!f.email || !f.password) throw new Error("Enter an email and password");
+        await liveAdmin.mintSuper(f.name, f.email, f.password, Number(f.commissionRate) || 8, Number(f.startingFloat) || 0);
+        toast(`${f.name} created`, "ok");
+        reload();
+      },
+    });
+  };
+  head(view, "Agents", "Every real agent-family account, every tier — mint a new super agent here; everything below it grows from that agent's own Downline page.", mintBtn);
+
+  const content = el(`<div></div>`);
+  content.appendChild(el(`<p class="muted" style="padding:24px 2px">Loading…</p>`));
+  view.appendChild(content);
+
+  async function reload() {
+    content.innerHTML = "";
+    content.appendChild(el(`<p class="muted" style="padding:24px 2px">Loading…</p>`));
+    try {
+      const rows = await liveAdmin.agentsList();
+      content.innerHTML = "";
+      const wrap = el(`<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Name</th><th>Kind</th><th>Parent</th><th>Email</th><th style="text-align:right">Commission</th><th style="text-align:right">Downline</th><th style="text-align:right">Points</th></tr></thead><tbody></tbody></table></div>`);
+      const tb = wrap.querySelector("tbody");
+      if (!rows.length) tb.appendChild(el(`<tr><td colspan="7" class="muted" style="text-align:center;padding:24px">No agents yet — mint a super agent to start.</td></tr>`));
+      rows.forEach((a) => tb.appendChild(el(`<tr>
+        <td><b>${esc(a.name)}</b></td>
+        <td><span class="pill dim">${esc(KIND_LABEL[a.kind] || a.kind)}</span></td>
+        <td class="muted">${esc(a.parentName || "—")}</td>
+        <td class="muted">${esc(a.email || "—")}</td>
+        <td class="mono" style="text-align:right">${a.commissionRate}%</td>
+        <td class="mono" style="text-align:right">${a.downlineCount}</td>
+        <td class="mono" style="text-align:right">${nice(a.points)}</td>
+      </tr>`)));
+      content.appendChild(wrap);
+    } catch (e) {
+      content.innerHTML = "";
+      content.appendChild(el(`<p class="muted" style="padding:24px 2px">Couldn't load: ${esc(e.message)}</p>`));
+    }
+  }
+  reload();
+}
+
 function viewAdminPlayers(view) {
+  if (liveAdmin.active) { viewAdminPlayersLive(view); return; }
   head(view, "Players", "Everyone who plays. Search, adjust points, suspend.");
   const bar = el(`<div class="card pad" style="margin-bottom:16px"><input class="i" id="pq" placeholder="Search name or email…"></div>`);
   view.appendChild(bar);
@@ -6190,7 +6357,81 @@ function viewAdminPlayers(view) {
   paint();
 }
 
+// Real players — search, top up, adjust (either direction, blocked from
+// going negative), suspend/reinstate (suspension blocks login server-side).
+// Separate render path; nothing here touches `store`.
+function viewAdminPlayersLive(view) {
+  head(view, "Players", "Every real player. Search, top up, adjust, suspend.");
+  const bar = el(`<div class="card pad" style="margin-bottom:16px"><input class="i" id="pq" placeholder="Search name or email…"></div>`);
+  view.appendChild(bar);
+  const host = el(`<div></div>`);
+  view.appendChild(host);
+
+  async function paint() {
+    const q = bar.querySelector("#pq").value.trim();
+    host.innerHTML = "";
+    host.appendChild(el(`<p class="muted" style="padding:24px 2px">Loading…</p>`));
+    try {
+      const list = await liveAdmin.players(q);
+      host.innerHTML = "";
+      const wrap = el(`<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Name</th><th>Email</th><th>Status</th><th style="text-align:right">Points</th><th style="text-align:right">Actions</th></tr></thead><tbody></tbody></table></div>`);
+      const tb = wrap.querySelector("tbody");
+      if (!list.length) tb.appendChild(el(`<tr><td colspan="5" class="muted" style="text-align:center;padding:24px">No players match.</td></tr>`));
+      list.forEach((u) => {
+        const tr = el(`<tr>
+          <td><b>${esc(u.name)}</b></td>
+          <td class="muted">${esc(u.email || "—")}</td>
+          <td><span class="pill ${u.status === "active" ? "ok" : "bad"}">${esc(u.status)}</span></td>
+          <td class="mono" style="text-align:right">${nice(u.points)}</td>
+          <td style="text-align:right"></td>
+        </tr>`);
+        const act = tr.lastElementChild;
+        const top = el(`<button class="btn sm">Top up</button>`);
+        top.onclick = () => {
+          const amt = field("Points to add", "amount", { type: "number", placeholder: "100" });
+          modal({
+            title: `Top up ${u.name}`, bodyNodes: amt, confirmText: "Add points",
+            async onConfirm() {
+              const v = Number(readForm(amt.parentElement).amount);
+              if (!(v > 0)) throw new Error("Enter an amount greater than 0");
+              await liveAdmin.topup(u.id, v);
+              toast("Points added", "ok"); paint();
+            },
+          });
+        };
+        const adj = el(`<button class="btn sm ghost">Adjust</button>`);
+        adj.onclick = () => {
+          const amt = field("Delta (+ or −)", "amount", { type: "number", placeholder: "e.g. 100 or -50" });
+          modal({
+            title: `Adjust ${u.name}`, bodyNodes: amt, confirmText: "Apply",
+            async onConfirm() {
+              const v = Number(readForm(amt.parentElement).amount);
+              if (!v) throw new Error("Enter a non-zero amount");
+              await liveAdmin.adjust(u.id, v);
+              toast("Adjusted", "ok"); paint();
+            },
+          });
+        };
+        const susp = el(`<button class="btn sm ${u.status === "active" ? "danger" : ""}">${u.status === "active" ? "Suspend" : "Reinstate"}</button>`);
+        susp.onclick = async () => {
+          try { await liveAdmin.setPlayerStatus(u.id, u.status === "active" ? "suspended" : "active"); toast("Status updated", "ok"); paint(); }
+          catch (e) { toast(e.message, "bad"); }
+        };
+        act.append(top, " ", adj, " ", susp);
+        tb.appendChild(tr);
+      });
+      host.appendChild(wrap);
+    } catch (e) {
+      host.innerHTML = "";
+      host.appendChild(el(`<p class="muted" style="padding:24px 2px">Couldn't load: ${esc(e.message)}</p>`));
+    }
+  }
+  bar.querySelector("#pq").addEventListener("input", () => paint());
+  paint();
+}
+
 function viewAdminRounds(view) {
+  if (liveAdmin.active) { viewAdminRoundsLive(view); return; }
   head(view, "Rounds", "Every settled play across all games, newest first.");
   const games = store.get().games;
   const bar = el(`<div class="game-tabs"></div>`);
@@ -6220,7 +6461,49 @@ function viewAdminRounds(view) {
   paint();
 }
 
+// Real rounds — every settled real play, across every game. Separate render
+// path; nothing here touches `store`.
+function viewAdminRoundsLive(view) {
+  head(view, "Rounds", "Every settled real play across all games, newest first.");
+  const gameIds = ["keno", "just6", "hotdice", "big3"];
+  const gameNames = { keno: "Keno", just6: "Just 6", hotdice: "Hot Dice", big3: "Big3" };
+  const bar = el(`<div class="game-tabs"></div>`);
+  let filter = "";
+  const mk = (id, label) => { const b = el(`<button class="game-tab ${filter === id ? "on" : ""}" style="padding:6px 13px;font-size:12px">${label}</button>`); b.onclick = () => { filter = id; paint(); }; return b; };
+  const host = el(`<div></div>`);
+
+  async function paint() {
+    bar.innerHTML = ""; bar.appendChild(mk("", "All"));
+    gameIds.forEach((id) => bar.appendChild(mk(id, gameNames[id])));
+    host.innerHTML = "";
+    host.appendChild(el(`<p class="muted" style="padding:24px 2px">Loading…</p>`));
+    try {
+      const rounds = await liveAdmin.rounds(filter || undefined, 150);
+      host.innerHTML = "";
+      const wrap = el(`<div class="tbl-wrap"><table class="tbl"><thead><tr><th>When</th><th>Game</th><th>Player</th><th>Selection</th><th style="text-align:right">Stake</th><th style="text-align:right">Win</th></tr></thead><tbody></tbody></table></div>`);
+      const tb = wrap.querySelector("tbody");
+      if (!rounds.length) tb.appendChild(el(`<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">No rounds yet.</td></tr>`));
+      rounds.forEach((r) => tb.appendChild(el(`<tr>
+        <td class="mono" style="color:var(--ink-dim)">${fmtTime(new Date(r.ts).getTime())}</td>
+        <td>${esc(gameNames[r.gameId] || r.gameId)}</td>
+        <td>${esc(r.userName)}</td>
+        <td class="mono" style="font-size:11.5px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc((r.selection || []).join(" "))}</td>
+        <td class="mono" style="text-align:right">${nice(r.stake)}</td>
+        <td class="mono" style="text-align:right;color:${r.win > 0 ? "var(--jade)" : "var(--ink-dim)"}">${r.win > 0 ? "+" + nice(r.win) : "—"}</td>
+      </tr>`)));
+      host.appendChild(wrap);
+    } catch (e) {
+      host.innerHTML = "";
+      host.appendChild(el(`<p class="muted" style="padding:24px 2px">Couldn't load: ${esc(e.message)}</p>`));
+    }
+  }
+  view.appendChild(bar);
+  view.appendChild(host);
+  paint();
+}
+
 function viewAdminLedger(view) {
+  if (liveAdmin.active) { viewAdminLedgerLive(view); return; }
   head(view, "Ledger", "Every points movement on the platform.");
   const types = ["", "topup", "allocation", "recall", "bet", "win", "adjustment"];
   const bar = el(`<div class="game-tabs"></div>`);
@@ -6243,6 +6526,45 @@ function viewAdminLedger(view) {
     </tr>`)));
     host.appendChild(wrap);
   };
+  view.appendChild(bar);
+  view.appendChild(host);
+  paint();
+}
+
+// Real ledger — every real transaction, platform-wide. Separate render
+// path; nothing here touches `store`.
+function viewAdminLedgerLive(view) {
+  head(view, "Ledger", "Every real points movement on the platform.");
+  const types = ["", "topup", "allocation", "recall", "bet", "win", "adjustment"];
+  const bar = el(`<div class="game-tabs"></div>`);
+  let ft = "";
+  const host = el(`<div></div>`);
+
+  async function paint() {
+    bar.innerHTML = "";
+    types.forEach((t) => { const b = el(`<button class="game-tab ${ft === t ? "on" : ""}" style="padding:6px 13px;font-size:12px">${t || "All"}</button>`); b.onclick = () => { ft = t; paint(); }; bar.appendChild(b); });
+    host.innerHTML = "";
+    host.appendChild(el(`<p class="muted" style="padding:24px 2px">Loading…</p>`));
+    try {
+      const rows = await liveAdmin.ledgerAll(ft || undefined, 250);
+      host.innerHTML = "";
+      const wrap = el(`<div class="tbl-wrap"><table class="tbl"><thead><tr><th>When</th><th>Account</th><th>Type</th><th>Note</th><th style="text-align:right">Amount</th><th style="text-align:right">Balance</th></tr></thead><tbody></tbody></table></div>`);
+      const tb = wrap.querySelector("tbody");
+      if (!rows.length) tb.appendChild(el(`<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">No activity yet.</td></tr>`));
+      rows.forEach((t) => tb.appendChild(el(`<tr>
+        <td class="mono" style="color:var(--ink-dim)">${fmtTime(new Date(t.ts).getTime())}</td>
+        <td>${esc(t.userName)}</td>
+        <td><span class="pill ${["win", "topup", "allocation"].includes(t.type) && t.amount >= 0 ? "ok" : t.type === "bet" ? "" : "dim"}">${esc(t.type)}</span></td>
+        <td>${esc(t.note || "")}</td>
+        <td class="mono" style="text-align:right;color:${t.amount >= 0 ? "var(--jade)" : "var(--rose)"}">${t.amount >= 0 ? "+" : ""}${nice(t.amount)}</td>
+        <td class="mono" style="text-align:right;color:var(--ink-dim)">${nice(t.balanceAfter)}</td>
+      </tr>`)));
+      host.appendChild(wrap);
+    } catch (e) {
+      host.innerHTML = "";
+      host.appendChild(el(`<p class="muted" style="padding:24px 2px">Couldn't load: ${esc(e.message)}</p>`));
+    }
+  }
   view.appendChild(bar);
   view.appendChild(host);
   paint();
