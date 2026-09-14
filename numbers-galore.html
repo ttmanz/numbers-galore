@@ -123,7 +123,7 @@ button, input, select { font: inherit; color: inherit; }
 
 /* ---- shell ---------------------------------------------------------------- */
 .app { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
-@media (max-width: 900px) { .app { grid-template-columns: 1fr; } }
+@media (max-width: 640px) { .app { grid-template-columns: 1fr; } }
 
 .rail {
   background: var(--surface);
@@ -132,7 +132,7 @@ button, input, select { font: inherit; color: inherit; }
   display: flex; flex-direction: column; gap: 4px;
   position: sticky; top: 0; height: 100vh; overflow-y: auto;
 }
-@media (max-width: 900px) {
+@media (max-width: 640px) {
   .rail { position: static; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px; }
 }
 .brand { display: flex; align-items: center; gap: 10px; padding: 4px 6px 16px; }
@@ -145,10 +145,10 @@ button, input, select { font: inherit; color: inherit; }
 }
 .brand b { font-family: "Bricolage Grotesque"; font-weight: 800; font-size: 15.5px; letter-spacing: -0.02em; }
 .brand span { display: block; font-size: 10.5px; color: var(--ink-dim); letter-spacing: .08em; text-transform: uppercase; }
-@media (max-width: 900px) { .brand { padding: 0 8px 0 0; } .brand span { display: none; } }
+@media (max-width: 640px) { .brand { padding: 0 8px 0 0; } .brand span { display: none; } }
 
 .nav-group { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-dim); padding: 14px 8px 6px; }
-@media (max-width: 900px) { .nav-group { display: none; } }
+@media (max-width: 640px) { .nav-group { display: none; } }
 .nav {
   display: flex; align-items: center; gap: 9px;
   padding: 8px 10px; border-radius: var(--radius-sm);
@@ -3139,7 +3139,7 @@ function render() {
   const rail = el(`<nav class="rail"></nav>`);
   rail.appendChild(el(`<div class="brand"><div class="dot">NG</div><div><b>Numbers Galore</b><span>Gaming platform</span></div></div>`));
   const navList = NAV[session.role];
-  if (window.innerWidth > 900) rail.appendChild(el(`<div class="nav-group">${KIND_LABEL[session.role] || session.role}</div>`));
+  if (window.innerWidth > 640) rail.appendChild(el(`<div class="nav-group">${KIND_LABEL[session.role] || session.role}</div>`));
   navList.forEach((n) => {
     const active = ("#/" + route) === n.href || (n.href !== NAV[session.role][0].href && ("#/" + route).startsWith(n.href));
     const a = el(`<a class="nav ${active ? "on" : ""}" href="${n.href}"><span class="ic">${n.ic}</span>${n.label}</a>`);
