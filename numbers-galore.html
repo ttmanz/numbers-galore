@@ -2316,7 +2316,7 @@ const liveAgent = {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Login failed");
-    if (data.user.role !== "agent") throw new Error("That account isn't an agent account");
+    if (!["super", "master", "agent"].includes(data.user.role)) throw new Error("That account isn't an agent-family account");
     this.token = data.token; this.user = data.user;
     try {
       sessionStorage.setItem("ngLiveAgentToken", this.token);
@@ -2341,14 +2341,20 @@ const liveAgent = {
     if (!res.ok) throw new Error(data.error || "Couldn't load downline");
     return data;
   },
-  async createPlayer(name, email, password, startingPoints) {
-    const res = await fetch("/api/agent/players", {
+  async recruit(name, email, password, startingPoints, commissionRate) {
+    const res = await fetch("/api/agent/recruit", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.token}` },
-      body: JSON.stringify({ name, email, password, startingPoints }),
+      body: JSON.stringify({ name, email, password, startingPoints, commissionRate }),
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Couldn't create player");
+    if (!res.ok) throw new Error(data.error || "Couldn't create account");
+    return data;
+  },
+  async ledger(limit = 80) {
+    const res = await fetch(`/api/agent/ledger?limit=${limit}`, { headers: { Authorization: `Bearer ${this.token}` } });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Couldn't load family ledger");
     return data;
   },
   async allocate(playerId, amount, note) {
@@ -5660,7 +5666,8 @@ function openTransfer(mode, agentUserId, target) {
    render path from the demo Downline above; nothing here touches `store`.
    ========================================================================= */
 function viewAgentLive(view) {
-  const addBtn = el(`<button class="btn primary sm">+ New player</button>`);
+  const addBtn = el(`<button class="btn primary sm">Loading…</button>`);
+  addBtn.disabled = true;
   const content = el(`<div></div>`);
   content.appendChild(el(`<p class="muted" style="padding:24px 2px">Loading your real downline…</p>`));
 
@@ -5669,19 +5676,26 @@ function viewAgentLive(view) {
     content.appendChild(el(`<p class="muted" style="padding:24px 2px">Loading your real downline…</p>`));
     try {
       const [me, dl] = await Promise.all([liveAgent.me(), liveAgent.downline()]);
+      const childKind = me.childKind || "player";
+      const childLabel = KIND_LABEL[childKind] || "Player";
+      addBtn.textContent = `+ New ${childLabel.toLowerCase()}`;
+      addBtn.disabled = false;
+      addBtn.onclick = () => openRecruitModal(childKind, childLabel, reload);
+
       content.innerHTML = "";
       content.appendChild(el(`<div class="grid-metrics">
         <div class="metric"><div class="k">Points on hand</div><div class="v">${nice(me.points)}</div></div>
-        <div class="metric"><div class="k">Players</div><div class="v">${me.playerCount}</div></div>
+        <div class="metric"><div class="k">${childKind === "player" ? "Players" : "Sub-agents"}</div><div class="v">${childKind === "player" ? me.playerCount : me.subAgentCount}</div></div>
         <div class="metric"><div class="k">Commission</div><div class="v">${me.commissionRate}%</div></div>
       </div>`));
       const wrap = el(`<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Name</th><th>Role</th><th>Email</th><th style="text-align:right">Points</th><th style="text-align:right">Actions</th></tr></thead><tbody></tbody></table></div>`);
       const tb = wrap.querySelector("tbody");
-      if (!dl.length) tb.appendChild(el(`<tr><td colspan="5" class="muted" style="text-align:center;padding:24px">No players yet — create one to allocate points.</td></tr>`));
+      if (!dl.length) tb.appendChild(el(`<tr><td colspan="5" class="muted" style="text-align:center;padding:24px">No ${childLabel.toLowerCase()}s yet — create one to allocate points.</td></tr>`));
       dl.forEach((u) => {
+        const roleLabel = KIND_LABEL[u.role] || u.role;
         const tr = el(`<tr>
           <td><b>${esc(u.name)}</b></td>
-          <td><span class="pill dim">${esc(u.role)}</span></td>
+          <td><span class="pill dim">${esc(roleLabel)}${u.commissionRate != null ? ` · ${u.commissionRate}%` : ""}</span></td>
           <td class="muted">${esc(u.email || "—")}</td>
           <td class="mono" style="text-align:right">${nice(u.points)}</td>
           <td style="text-align:right"></td>
@@ -5700,28 +5714,30 @@ function viewAgentLive(view) {
       content.appendChild(el(`<p class="muted" style="padding:24px 2px">Couldn't load: ${esc(e.message)}</p>`));
     }
   }
-  addBtn.onclick = () => openCreateLivePlayer(reload);
 
-  head(view, "Downline", "Real players you've recruited — allocate or recall their points.", addBtn);
+  head(view, "Downline", "Real accounts you've recruited — allocate or recall their points.", addBtn);
   view.appendChild(content);
   reload();
 }
 
-function openCreateLivePlayer(done) {
+function openRecruitModal(childKind, childLabel, done) {
   const box = el(`<div class="stack"></div>`);
   [field("Name", "name"),
    field("Email", "email", { type: "email", placeholder: "you@example.com" }),
    field("Password", "password", { type: "password", placeholder: "at least 6 characters" }),
    field("Starting points (optional)", "startingPoints", { type: "number", placeholder: "0" })].forEach((n) => box.appendChild(n));
+  if (childKind !== "player") {
+    box.appendChild(field("Commission %", "commissionRate", { type: "number", value: 4 }));
+  }
   modal({
-    title: "New player",
+    title: `New ${childLabel.toLowerCase()}`,
     bodyNodes: box,
     confirmText: "Create",
     async onConfirm() {
       const f = readForm(box);
       if (!f.name) throw new Error("Enter a name");
       if (!f.email || !f.password) throw new Error("Enter an email and password");
-      await liveAgent.createPlayer(f.name, f.email, f.password, Number(f.startingPoints) || 0);
+      await liveAgent.recruit(f.name, f.email, f.password, Number(f.startingPoints) || 0, Number(f.commissionRate) || 4);
       toast(`${f.name} created`, "ok");
       done && done();
     },
@@ -5830,11 +5846,9 @@ function openCreateChild(parentUserId, childKind, done) {
 }
 
 function viewAgentLedger(view) {
+  if (liveAgent.active) { viewAgentLedgerLive(view); return; }
   const { rows, summary } = api.agent.familyLedger(session.userId, 80);
   head(view, "Family ledger", "Points movement and betting across your whole downline.");
-  if (liveAgent.active) {
-    view.appendChild(el(`<p class="muted" style="margin:2px 2px 14px">Signed in live — but a real family ledger isn't built yet, so this still shows demo data. Your Downline page (players, allocate, recall) is real.</p>`));
-  }
   view.appendChild(el(`<div class="grid-metrics">
     <div class="metric"><div class="k">Family size</div><div class="v">${summary.familySize}</div></div>
     <div class="metric"><div class="k">Turnover</div><div class="v">${nice(summary.turnover)}</div></div>
@@ -5851,6 +5865,41 @@ function viewAgentLedger(view) {
     <td class="mono" style="text-align:right;color:${t.amount >= 0 ? "var(--jade)" : "var(--rose)"}">${t.amount >= 0 ? "+" : ""}${nice(t.amount)}</td>
   </tr>`)));
   view.appendChild(wrap);
+}
+
+// Real family ledger — recursive rollup across every tier of a real agent's
+// downline (server-side WITH RECURSIVE over users.agent_id), not just direct
+// reports. Separate render path from the demo ledger above; nothing here
+// touches `store`.
+function viewAgentLedgerLive(view) {
+  head(view, "Family ledger", "Points movement and betting across your whole real downline, every tier.");
+  const content = el(`<div></div>`);
+  content.appendChild(el(`<p class="muted" style="padding:24px 2px">Loading…</p>`));
+  view.appendChild(content);
+
+  liveAgent.ledger(80).then(({ rows, summary }) => {
+    content.innerHTML = "";
+    content.appendChild(el(`<div class="grid-metrics">
+      <div class="metric"><div class="k">Family size</div><div class="v">${summary.familySize}</div></div>
+      <div class="metric"><div class="k">Turnover</div><div class="v">${nice(summary.turnover)}</div></div>
+      <div class="metric"><div class="k">Gross margin (GGR)</div><div class="v ${summary.ggr >= 0 ? "jade" : "rose"}">${nice(summary.ggr)}</div></div>
+      <div class="metric"><div class="k">Est. commission</div><div class="v">${nice(summary.estCommission)}</div><div class="sub">GGR × rate — reporting only</div></div>
+    </div>`));
+    const wrap = el(`<div class="tbl-wrap"><table class="tbl"><thead><tr><th>When</th><th>Account</th><th>Type</th><th>Note</th><th style="text-align:right">Amount</th></tr></thead><tbody></tbody></table></div>`);
+    const tb = wrap.querySelector("tbody");
+    if (!rows.length) tb.appendChild(el(`<tr><td colspan="5" class="muted" style="text-align:center;padding:24px">No activity in your downline yet.</td></tr>`));
+    rows.forEach((t) => tb.appendChild(el(`<tr>
+      <td class="mono" style="color:var(--ink-dim)">${fmtTime(new Date(t.ts).getTime())}</td>
+      <td>${esc(t.userName)}</td>
+      <td><span class="pill dim">${esc(t.type)}</span></td>
+      <td>${esc(t.note || "")}</td>
+      <td class="mono" style="text-align:right;color:${t.amount >= 0 ? "var(--jade)" : "var(--rose)"}">${t.amount >= 0 ? "+" : ""}${nice(t.amount)}</td>
+    </tr>`)));
+    content.appendChild(wrap);
+  }).catch((e) => {
+    content.innerHTML = "";
+    content.appendChild(el(`<p class="muted" style="padding:24px 2px">Couldn't load: ${esc(e.message)}</p>`));
+  });
 }
 
 /* =========================================================================
