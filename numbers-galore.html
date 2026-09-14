@@ -839,6 +839,12 @@ hr.sep { border: none; border-top: 1px solid var(--line-soft); margin: 4px 0; }
   --bs: 4cqw; margin: calc(var(--bs) / -2) 0 0 calc(var(--bs) / -2);
   will-change: transform;
 }
+/* These numbers are cosmetic filler (random, not the real draw) — but a
+   player squinting at a "6" tumbling by shouldn't be able to read it as if
+   it means anything. Blurred rather than removed so the balls still read as
+   printed lottery balls, just genuinely illegible mid-churn, same as a real
+   machine spinning too fast to read. */
+.j6-drum .j6-ball > span { filter: blur(1.4px); opacity: .7; }
 /* No physics under reduced motion: the balls just sit where they were spawned. */
 @media (prefers-reduced-motion: reduce) {
   .j6-drum .j6-ball { transform: translate(var(--fx), var(--fy)); }
@@ -5345,6 +5351,14 @@ function viewBig3(view) {
     try {
       const round = await playRound("big3", [], 0, S.slip);
       S.busy = false;
+      // A beat of anticipation before the reels actually engage — also gives
+      // scrollToDraw's smooth-scroll (fired on click, just above) time to
+      // settle first, so the spin doesn't start while the page is still
+      // moving under it. Skipped under reduced motion, which wants less
+      // waiting, not more.
+      if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        await new Promise((r) => setTimeout(r, 1000));
+      }
       await animateBig3(round);
       S.spinning = false;
       S.lastRound = round;
