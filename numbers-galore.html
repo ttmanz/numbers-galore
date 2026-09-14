@@ -2337,6 +2337,7 @@ const liveAdmin = {
   ledgerAll(type, limit = 200) { return this._get(`/api/admin/ledger?limit=${limit}${type ? `&type=${type}` : ""}`); },
   games() { return this._get("/api/admin/games"); },
   updateGame(id, patch) { return this._post(`/api/admin/games/${id}`, patch); },
+  setAgentLimits(userId, patch) { return this._post(`/api/admin/agents/${userId}/limits`, patch); },
 };
 
 /* A third, equally independent live session for an agent account — same
@@ -6539,18 +6540,50 @@ function viewAdminAgentsLive(view) {
     try {
       const rows = await liveAdmin.agentsList();
       content.innerHTML = "";
-      const wrap = el(`<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Name</th><th>Kind</th><th>Parent</th><th>Email</th><th style="text-align:right">Commission</th><th style="text-align:right">Downline</th><th style="text-align:right">Points</th></tr></thead><tbody></tbody></table></div>`);
+      const wrap = el(`<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Name</th><th>Kind</th><th>Parent</th><th>Email</th><th style="text-align:right">Commission</th><th style="text-align:right">Downline</th><th style="text-align:right">Points</th><th>Bet limits</th><th></th></tr></thead><tbody></tbody></table></div>`);
       const tb = wrap.querySelector("tbody");
-      if (!rows.length) tb.appendChild(el(`<tr><td colspan="7" class="muted" style="text-align:center;padding:24px">No agents yet — mint a super agent to start.</td></tr>`));
-      rows.forEach((a) => tb.appendChild(el(`<tr>
-        <td><b>${esc(a.name)}</b></td>
-        <td><span class="pill dim">${esc(KIND_LABEL[a.kind] || a.kind)}</span></td>
-        <td class="muted">${esc(a.parentName || "—")}</td>
-        <td class="muted">${esc(a.email || "—")}</td>
-        <td class="mono" style="text-align:right">${a.commissionRate}%</td>
-        <td class="mono" style="text-align:right">${a.downlineCount}</td>
-        <td class="mono" style="text-align:right">${nice(a.points)}</td>
-      </tr>`)));
+      if (!rows.length) tb.appendChild(el(`<tr><td colspan="9" class="muted" style="text-align:center;padding:24px">No agents yet — mint a super agent to start.</td></tr>`));
+      rows.forEach((a) => {
+        const limitsText = a.minStakeOverride == null && a.maxStakeOverride == null
+          ? "Default"
+          : `${a.minStakeOverride ?? "default"}–${a.maxStakeOverride ?? "default"}`;
+        const tr = el(`<tr>
+          <td><b>${esc(a.name)}</b></td>
+          <td><span class="pill dim">${esc(KIND_LABEL[a.kind] || a.kind)}</span></td>
+          <td class="muted">${esc(a.parentName || "—")}</td>
+          <td class="muted">${esc(a.email || "—")}</td>
+          <td class="mono" style="text-align:right">${a.commissionRate}%</td>
+          <td class="mono" style="text-align:right">${a.downlineCount}</td>
+          <td class="mono" style="text-align:right">${nice(a.points)}</td>
+          <td class="mono muted">${esc(limitsText)}</td>
+          <td></td>
+        </tr>`);
+        const editBtn = el(`<button class="btn sm">Edit</button>`);
+        // Overrides apply to this agent's ENTIRE downline (see resolveStakeLimits()
+        // server-side) — a super agent whose players deal in a much weaker or
+        // stronger currency than the platform default gets their own bet floor
+        // without touching the shared per-game config everyone else uses.
+        editBtn.onclick = () => {
+          const box = el(`<div class="stack"></div>`);
+          box.appendChild(el(`<p class="muted" style="font-size:12.5px;margin:0">Overrides the min/max bet (in points) for every player under ${esc(a.name)}'s whole downline. Leave a field blank to inherit each game's own default.</p>`));
+          [field("Min bet override", "min", { type: "number", placeholder: "default", value: a.minStakeOverride ?? "" }),
+           field("Max bet override", "max", { type: "number", placeholder: "default", value: a.maxStakeOverride ?? "" })].forEach((n) => box.appendChild(n));
+          modal({
+            title: `Bet limits — ${a.name}`, bodyNodes: box, confirmText: "Save",
+            async onConfirm() {
+              const f = readForm(box);
+              await liveAdmin.setAgentLimits(a.id, {
+                minStakeOverride: f.min === "" ? null : Number(f.min),
+                maxStakeOverride: f.max === "" ? null : Number(f.max),
+              });
+              toast(`Bet limits saved for ${a.name}`, "ok");
+              reload();
+            },
+          });
+        };
+        tr.lastElementChild.appendChild(editBtn);
+        tb.appendChild(tr);
+      });
       content.appendChild(wrap);
     } catch (e) {
       content.innerHTML = "";
