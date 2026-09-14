@@ -4000,6 +4000,19 @@ const J6_PHYS = {
   STEP: 1 / 60, MAX_STEPS: 3,
 };
 
+// Just 6's own drum runs livelier than Keno's — smaller balls with more room
+// to move, more turbulence, harder/more frequent kicks, and near-perfectly
+// elastic collisions so the energy doesn't bleed off between kicks. Vessel
+// geometry (SIZE/CENTRE/R_INNER/PERSP/etc.) stays identical to J6_PHYS, which
+// Keno's own tumbler keeps using unchanged.
+const JUST6_PHYS = {
+  ...J6_PHYS,
+  BALL_R: 19,
+  F_TURB: 230, V_MIN: 16, V_MAX: 200,
+  KICK: 55, KICK_MS: 320,
+  RESTITUTION: 0.99, WALL_K: 380,
+};
+
 let J6_DRUM = null;     // the running drum, if there is one
 
 function just6DrumStop() {
@@ -4010,7 +4023,7 @@ function just6DrumStop() {
 
 function just6DrumStart(layer) {
   just6DrumStop();
-  const P = J6_PHYS;
+  const P = JUST6_PHYS;
   const balls = [...layer.querySelectorAll(".j6-ball")].map((el) => ({
     el,
     // spawned in the bottom hemisphere, so the first half-second reads as a
@@ -4122,7 +4135,7 @@ function just6DrumBalls() {
   JUST6_DRUM_BALLS = range(1, 19).map(() => {
     let x, y, z;
     do { x = rnd(-R, R); y = -Math.random() * R; z = rnd(-R, R); } while (x * x + y * y + z * z > R * R);
-    return { n: Math.ceil(Math.random() * 48), x, y, z, size: rnd(3.3, 4.1) };
+    return { n: Math.ceil(Math.random() * 48), x, y, z, size: rnd(2.4, 3.0) };
   });
   return JUST6_DRUM_BALLS;
 }
