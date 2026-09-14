@@ -3117,6 +3117,14 @@ const NAV = {
 function render() {
   const root = document.getElementById("root");
   const route = location.hash.slice(2) || "play";
+  const ids = api.auth.identities();
+  // Keep session.role in sync with whatever route we're actually on — not
+  // just when a switcher pill is clicked (assume()), but also a direct
+  // link/bookmark/back-button landing on #/agent or #/admin. That's how
+  // staff reach their console once the switcher is hidden for a real
+  // signed-in player, below.
+  const routeRole = route.startsWith("admin") ? "admin" : route.startsWith("agent") ? "agent" : "player";
+  if (routeRole !== session.role) { session.role = routeRole; session.userId = ids[routeRole].id; }
   const me = store.get().users.find((u) => u.id === session.userId);
   const bal = me.role === "admin" ? null
     : live.active && me.role === "player" ? live.user.points
@@ -3145,14 +3153,19 @@ function render() {
   // main
   const main = el(`<div class="main"></div>`);
   const topbar = el(`<div class="topbar"></div>`);
-  const ids = api.auth.identities();
-  const switcher = el(`<div class="switcher"></div>`);
-  [["player", ids.player], ["agent", ids.agent], ["admin", ids.admin]].forEach(([r, u]) => {
-    const c = el(`<button class="chip ${session.role === r ? "on" : ""}"><span class="r">${r}</span>${esc(u.name.split(" ")[0])}</button>`);
-    c.onclick = () => assume(r);
-    switcher.appendChild(c);
-  });
-  topbar.appendChild(switcher);
+  // A real signed-in player is a genuine customer, not a tester — they never
+  // see the demo Player/Agent/Admin switcher. Staff still reach Agent/Admin
+  // directly by URL (numbers-galore.com/play.html#/agent or #/admin), which
+  // the role-sync above makes work correctly without ever clicking a pill.
+  if (!live.active) {
+    const switcher = el(`<div class="switcher"></div>`);
+    [["player", ids.player], ["agent", ids.agent], ["admin", ids.admin]].forEach(([r, u]) => {
+      const c = el(`<button class="chip ${session.role === r ? "on" : ""}"><span class="r">${r}</span>${esc(u.name.split(" ")[0])}</button>`);
+      c.onclick = () => assume(r);
+      switcher.appendChild(c);
+    });
+    topbar.appendChild(switcher);
+  }
 
   const who = el(`<div class="who"><div class="av">${esc(me.name[0])}</div><div><b>${esc(me.name)}</b><br><span>${KIND_LABEL[me.role]}${me.role === "agent" ? " · " + (agents.record(me.id)?.commissionRate ?? 0) + "% comm." : ""}</span></div></div>`);
   topbar.appendChild(who);
