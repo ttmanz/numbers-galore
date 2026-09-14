@@ -2997,6 +2997,18 @@ function announce(msg) {
   n.textContent = n.textContent.endsWith(" ") ? msg : msg + " ";
 }
 
+// Bring a game's draw/animation area into view the instant Play is pressed —
+// on a phone the stage is often below the fold once the board and controls
+// are on screen, and a player who has to scroll to find their own result is
+// the actual bug this fixes. Reduced-motion gets an instant jump instead of
+// a smooth scroll; either way it never steals keyboard focus.
+function scrollToDraw(selector) {
+  const el = document.querySelector(selector);
+  if (!el) return;
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  el.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "center" });
+}
+
 function toast(msg, kind = "") {
   const t = el(`<div class="toast ${kind}">${esc(msg)}</div>`);
   document.getElementById("toasts").appendChild(t);
@@ -3661,6 +3673,7 @@ function viewKeno(view) {
     if (me.points < S.stake) { toast("Not enough points", "bad"); return; }
     S.busy = true; S.drawing = true; S.lastRound = null;
     refresh();
+    scrollToDraw(".keno-display-wrap");
     announce("The machine is drawing.");
     try {
       const round = await playRound("keno", S.picks.slice(), S.stake, null);
@@ -4425,6 +4438,7 @@ function viewJust6(view) {
     if (me.points < totalCost) { toast(`Need ${nice(totalCost)} points`, "bad"); return; }
     S.busy = true; S.drawing = true; S.showResults = false; S.lastRound = null;
     refresh();                                        // the machine starts turning right away
+    scrollToDraw(".j6-display-wrap");
     announce("The machine is drawing.");
     try {
       const round = await playRound("just6", S.picks.slice(), S.stake, side);
@@ -4843,6 +4857,7 @@ function viewHotDice(view) {
     if (S.busy) return;
     if (S.locked) { toast(`Locked — ${S.autoLeft} rolls left`, ""); return; }
     if (slipTotal <= 0) { toast("Place a bet first", "bad"); return; }
+    scrollToDraw(".hd-stage-wrap");
     runHotDice();
   };
   board.appendChild(rollBtn);
@@ -5210,6 +5225,7 @@ function viewBig3(view) {
   playBtn.onclick = () => {
     if (locked) return;
     if (!betCount) { toast("Place a bet first", "bad"); return; }
+    scrollToDraw(".b3-reels");
     runBig3();
   };
   playWrap.appendChild(playBtn);
