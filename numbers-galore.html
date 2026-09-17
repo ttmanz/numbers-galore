@@ -5334,6 +5334,10 @@ function viewBig3(view) {
     // Rev.Tri-cast) that was never turned into a bet — otherwise Clear wipes
     // the slip but leaves those dropdowns showing digits from before.
     S.fc = [null, null]; S.rfc = [null, null]; S.tc = [null, null, null]; S.rtc = [null, null, null];
+    // And collapse every market accordion back closed — Clear should return
+    // the whole slip UI to how it looked before anything was opened, not
+    // just empty out the bets while leaving whatever panel was expanded.
+    S.open = {};
     S.lastRound = null;
     refresh();
     announce("All bets cleared.");
