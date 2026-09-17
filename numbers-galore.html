@@ -5327,7 +5327,17 @@ function viewBig3(view) {
   foot.appendChild(stepWrap);
 
   const clearBtn = el(`<button class="b3-btn" data-fk="clear" aria-label="Clear every bet" aria-disabled="${locked || !betCount}">Clear</button>`);
-  clearBtn.onclick = () => { if (locked || !betCount) return; S.slip = {}; S.lastRound = null; refresh(); announce("All bets cleared."); };
+  clearBtn.onclick = () => {
+    if (locked || !betCount) return;
+    S.slip = {};
+    // Also reset any in-progress combo pick (Forecast/Rev.Forecast/Tri-cast/
+    // Rev.Tri-cast) that was never turned into a bet — otherwise Clear wipes
+    // the slip but leaves those dropdowns showing digits from before.
+    S.fc = [null, null]; S.rfc = [null, null]; S.tc = [null, null, null]; S.rtc = [null, null, null];
+    S.lastRound = null;
+    refresh();
+    announce("All bets cleared.");
+  };
   foot.appendChild(clearBtn);
   cab.appendChild(foot);
 
