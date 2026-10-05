@@ -3226,6 +3226,7 @@ function render() {
   const viewKey = route + "|" + currentGameId;
   const keepY = viewKey === lastRenderKey ? window.scrollY : 0;
   lastRenderKey = viewKey;
+  if (keepY) pinPageHeight();
   root.innerHTML = "";
   const app = el(`<div class="app"></div>`);
 
@@ -3327,7 +3328,10 @@ function render() {
     "admin/live-requests": viewAdminLiveRequests,
   };
   (R[route] || viewPlay)(view);
-  if (keepY) window.scrollTo(0, keepY);
+  if (keepY) {
+    window.scrollTo(0, keepY);
+    requestAnimationFrame(() => { if (window.scrollY < keepY - 2) window.scrollTo(0, keepY); });
+  }
 }
 
 function toggleTheme() {
@@ -3903,7 +3907,19 @@ async function animateKenoDraw(round, S, cfg) {
   wrap.classList.remove("drawing");
 }
 
-function clearAndReturn(view) { view.innerHTML = ""; return view; }
+// Wiping a view shrinks the page for a moment, and Samsung Internet clamps the
+// scroll position to the shrunken height and never restores it (Chrome does) —
+// the player got thrown back to the top after every draw. Holding the page at
+// its old height until the rebuilt view (images included) has laid out stops
+// the clamp from ever happening.
+let pinTimer = null;
+function pinPageHeight() {
+  const b = document.body;
+  b.style.minHeight = document.documentElement.scrollHeight + "px";
+  clearTimeout(pinTimer);
+  pinTimer = setTimeout(() => { b.style.minHeight = ""; }, 1500);
+}
+function clearAndReturn(view) { pinPageHeight(); view.innerHTML = ""; return view; }
 
 // Big 3 rounds have no single "hits" list — it's a bet slip of independent
 // spots — so it needs its own banner rather than a generic "N of M matched"
