@@ -3197,6 +3197,7 @@ const NAV = {
   ],
 };
 
+let lastRenderKey = null;
 function render() {
   const root = document.getElementById("root");
   const route = location.hash.slice(2) || "play";
@@ -3218,6 +3219,13 @@ function render() {
     : liveAgent.active && me.role === "agent" ? liveAgent.user.points
     : me.points;
 
+  // Rebuilding the tree collapses the page for a moment; some mobile browsers
+  // (Samsung Internet) clamp scroll to 0 and never restore it, so a re-render
+  // after a draw threw the player back to the top. Remember where we were and
+  // put it back — but only when staying on the same screen.
+  const viewKey = route + "|" + currentGameId;
+  const keepY = viewKey === lastRenderKey ? window.scrollY : 0;
+  lastRenderKey = viewKey;
   root.innerHTML = "";
   const app = el(`<div class="app"></div>`);
 
@@ -3319,6 +3327,7 @@ function render() {
     "admin/live-requests": viewAdminLiveRequests,
   };
   (R[route] || viewPlay)(view);
+  if (keepY) window.scrollTo(0, keepY);
 }
 
 function toggleTheme() {
@@ -3597,7 +3606,7 @@ function viewKeno(view) {
   const drawPanel = el(`<div class="keno-drawpanel" data-drawlist role="group" aria-label="Numbers drawn, in order"
     style="left:${KENO_DRAWBOX.x}%;top:${KENO_DRAWBOX.y}%;width:${KENO_DRAWBOX.w}%;height:${KENO_DRAWBOX.h}%"></div>`);
   drawPanel.appendChild(el(`<span class="kdraw-lbl">Draw</span>`));
-  drawnList.forEach((n) => drawPanel.appendChild(kenoChip(n, S.picks.includes(n), false)));
+  drawnList.forEach((n) => drawPanel.appendChild(kenoChip(n, (S.lastRound?.selection || S.picks).includes(n), false)));
   if (!drawnList.length) drawPanel.appendChild(el(`<span class="ksel-empty">Numbers appear here as they are drawn.</span>`));
   stage.appendChild(drawPanel);
   cab.appendChild(stage);
@@ -3783,6 +3792,7 @@ function viewKeno(view) {
       await animateKenoDraw(round, S, cfg);
       S.drawing = false;
       S.lastRound = round;
+      S.picks = [];                                   // single draw: the player re-places the bet
       render();
       round.win > 0 ? sfx.win() : sfx.lose();
       const msg = round.win > 0 ? `Won ${nice(round.win)} points!` : "No win this time";
@@ -4343,7 +4353,7 @@ function viewJust6(view) {
     // a home for all 35 balls, so all 35 are placed live.
     for (let pos = 1; pos <= cfg.draw; pos++) {
       const n = R?.drawn[pos - 1];
-      const isHit = n != null && S.picks.includes(n);
+      const isHit = n != null && (R?.selection || S.picks).includes(n);
       const xy = JUST6_POS_XY[pos];
       const cls = ["j6-slot", pos <= cfg.preNumbers ? "pre" : "", n == null ? "" : "j6-ball",
         isHit ? "hit" : "", closePositions.has(pos) ? "close" : ""].filter(Boolean).join(" ");
@@ -4558,6 +4568,7 @@ function viewJust6(view) {
       S.drawing = false;
       S.lastRound = round;
       S.showResults = true;
+      S.picks = []; S.side = {};                      // single draw: the player re-places the bet
       render();
       round.win > 0 ? sfx.win() : sfx.lose();
       const msg = round.win > 0 ? `Won ${nice(round.win)} points!` : "No win this time";
@@ -4591,15 +4602,13 @@ function just6CostSentence(S, cfg) {
 
 // Leaving the results screen puts the board back the way it was before the
 // draw — balls off the display, the strip gone, nothing marked on the grid —
-// but keeps the numbers, speciality bets and stake, so the next round is one
-// press away rather than a rebuild.
+// (the numbers and speciality bets were already cleared when the draw ended;
+// the stake stays).
 function just6ClearForNextBet(S) {
   S.showResults = false;
   S.lastRound = null;
   render();
-  announce(S.picks.length || Object.keys(S.side).length
-    ? "Board cleared. Your bet is still set — press Play for the next round."
-    : "Board cleared, ready for the next bet.");
+  announce("Board cleared, ready for the next bet.");
 }
 
 function renderJust6WinHistory(body, h) {
@@ -5050,6 +5059,7 @@ function viewHotDice(view) {
       S.rolling = false;
       S.lastRound = round;
       if (S.autoLeft > 0) { S.autoLeft--; if (S.autoLeft === 0) S.locked = false; }
+      if (!S.auto && S.autoLeft <= 0) S.slip = {};    // nothing left to repeat: the player re-places the bet
       render();
       round.win > 0 ? sfx.win() : sfx.lose();
       const d = round.breakdown.dice;
@@ -5067,7 +5077,7 @@ function viewHotDice(view) {
     if (!S.auto && S.autoLeft <= 0) return;
     const cost = Object.values(S.slip).reduce((a, b) => a + b, 0);
     if (cost <= 0 || wallet.balance(session.userId) < cost) {
-      S.auto = false; S.autoLeft = 0; S.locked = false;
+      S.auto = false; S.autoLeft = 0; S.locked = false; S.slip = {};
       toast("Auto stopped", ""); announce("Auto stopped."); render(); return;
     }
     setTimeout(() => { if (S.auto || S.autoLeft > 0) runHotDice(); }, 850);
@@ -5382,6 +5392,11 @@ function viewBig3(view) {
       await animateBig3(round);
       S.spinning = false;
       S.lastRound = round;
+      if (!S.auto) {                                  // single spin: the player re-places the bet
+        S.slip = {};
+        S.fc = [null, null]; S.rfc = [null, null]; S.tc = [null, null, null]; S.rtc = [null, null, null];
+        S.open = {};
+      }
       render();
       round.win > 0 ? sfx.win() : sfx.lose();
       const msg = round.win > 0 ? `Won ${nice(round.win)} points!` : "No win this time";
@@ -5399,7 +5414,7 @@ function big3AutoTick(S, cfg, me) {
   if (S.busy || S.spinning || !S.auto) return;
   const cost = Object.values(S.slip).reduce((a, b) => a + b, 0);
   if (!cost || wallet.balance(session.userId) < cost) {
-    S.auto = false; toast("Auto stopped", ""); announce("Auto stopped."); render(); return;
+    S.auto = false; S.slip = {}; toast("Auto stopped", ""); announce("Auto stopped."); render(); return;
   }
   setTimeout(() => {
     if (!S.auto || S.busy || S.spinning) return;
